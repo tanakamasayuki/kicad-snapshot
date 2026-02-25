@@ -149,6 +149,7 @@ TRANSLATIONS = {
         "compare_visual_after": "After",
         "compare_visual_empty": "(empty)",
         "compare_image_title": "Image Diff",
+        "compare_loading": "Loading compare data...",
         "compare_image_target": "Target",
         "compare_image_rendering": "Rendering...",
         "compare_image_status_ready": "Ready.",
@@ -255,6 +256,7 @@ TRANSLATIONS = {
         "compare_visual_after": "After",
         "compare_visual_empty": "(空)",
         "compare_image_title": "画像差分",
+        "compare_loading": "比較データを読み込み中...",
         "compare_image_target": "対象",
         "compare_image_rendering": "レンダリング中...",
         "compare_image_status_ready": "準備完了。",
@@ -2611,9 +2613,6 @@ class MainWindow(QMainWindow):
         self.compare_item_list = QListWidget()
         self.compare_item_list.currentRowChanged.connect(self.on_compare_item_selected)
         left_layout.addWidget(self.compare_item_list, 1)
-        self.compare_status_label = QLabel(self.t("compare_image_rendering"))
-        self.compare_status_label.setStyleSheet("color: #666666;")
-        left_layout.addWidget(self.compare_status_label)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -2652,10 +2651,15 @@ class MainWindow(QMainWindow):
         content_split.setStretchFactor(1, 5)
         content_split.setSizes([260, 980])
         layout.addWidget(content_split, 1)
+        self.compare_status_label = QLabel(self.t("compare_image_rendering"))
+        self.compare_status_label.setStyleSheet("color: #666666;")
+        layout.addWidget(self.compare_status_label)
 
         self.compare_active_project: Path | None = None
         self.compare_from_id: str | None = None
         self.compare_to_id: str | None = None
+        self._compare_pending_from_id: str | None = None
+        self._compare_pending_to_id: str | None = None
         self.compare_before_map: dict[str, bytes] = {}
         self.compare_after_map: dict[str, bytes] = {}
         self.compare_targets: list[dict[str, str | None]] = []
@@ -2723,7 +2727,6 @@ class MainWindow(QMainWindow):
         self.page_stack.setCurrentWidget(self.snapshot_page)
 
     def open_compare_from_snapshot(self) -> None:
-        t0 = time.perf_counter()
         if self.snapshot_active_project is None:
             QMessageBox.warning(self, self.t("warning_project_title"), self.t("warning_project_text"))
             return
@@ -2741,29 +2744,11 @@ class MainWindow(QMainWindow):
         if not isinstance(from_id, str) or not isinstance(to_id, str):
             QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
             return
-        try:
-            t_load0 = time.perf_counter()
-            before_map = self._load_snapshot_source_map(from_id)
-            t_load1 = time.perf_counter()
-            after_map = self._load_snapshot_source_map(to_id)
-            t_load2 = time.perf_counter()
-        except Exception as exc:
-            QMessageBox.warning(self, self.t("compare_started_title"), str(exc))
-            return
-        print(
-            f"[perf] open_compare/load_maps before={t_load1 - t_load0:.3f}s after={t_load2 - t_load1:.3f}s "
-            f"before_files={len(before_map)} after_files={len(after_map)}",
-            flush=True,
-        )
-        self.show_compare_page(
-            project=str(self.snapshot_active_project),
-            output_dir="",
-            from_id=from_id,
-            to_id=to_id,
-            before_map=before_map,
-            after_map=after_map,
-        )
-        print(f"[perf] open_compare/total {time.perf_counter() - t0:.3f}s", flush=True)
+        self._compare_pending_from_id = from_id
+        self._compare_pending_to_id = to_id
+        # Show compare page immediately, then run heavy preparation.
+        self.show_compare_page(project=str(self.snapshot_active_project), output_dir="")
+        QTimer.singleShot(0, self._prepare_compare_after_show)
 
     def _load_snapshot_source_map(self, source_id: str) -> dict[str, bytes]:
         if self.snapshot_active_project is None:
@@ -2864,28 +2849,61 @@ class MainWindow(QMainWindow):
         before_map: dict[str, bytes] | None = None,
         after_map: dict[str, bytes] | None = None,
     ) -> None:
-        t0 = time.perf_counter()
         del output_dir
         self.compare_active_project = Path(project)
         self.compare_from_id = from_id
         self.compare_to_id = to_id
         self.compare_before_map = before_map or {}
         self.compare_after_map = after_map or {}
-        t_prep0 = time.perf_counter()
-        self._prepare_compare_temp_dirs()
-        t_prep1 = time.perf_counter()
-        t_list0 = time.perf_counter()
-        self.populate_compare_item_list()
-        t_list1 = time.perf_counter()
+        self.compare_item_list.clear()
+        self._reset_compare_preview()
+        self.compare_status_label.setText(self.t("compare_loading"))
+        self.compare_status_label.setStyleSheet("color: #666666;")
         self.page_stack.setCurrentWidget(self.compare_page)
-        if self.compare_item_list.count() > 0:
-            QTimer.singleShot(0, lambda: self.compare_item_list.setCurrentRow(0))
-        print(
-            f"[perf] show_compare_page prep_tmp={t_prep1 - t_prep0:.3f}s "
-            f"populate_list={t_list1 - t_list0:.3f}s total={time.perf_counter() - t0:.3f}s "
-            f"targets={len(self.compare_targets)}",
-            flush=True,
-        )
+
+    def _prepare_compare_after_show(self) -> None:
+        if self.compare_active_project is None:
+            return
+        if self._compare_pending_from_id is None or self._compare_pending_to_id is None:
+            return
+        from_id = self._compare_pending_from_id
+        to_id = self._compare_pending_to_id
+        t0 = time.perf_counter()
+        try:
+            t_load0 = time.perf_counter()
+            before_map = self._load_snapshot_source_map(from_id)
+            t_load1 = time.perf_counter()
+            after_map = self._load_snapshot_source_map(to_id)
+            t_load2 = time.perf_counter()
+            print(
+                f"[perf] open_compare/load_maps before={t_load1 - t_load0:.3f}s after={t_load2 - t_load1:.3f}s "
+                f"before_files={len(before_map)} after_files={len(after_map)}",
+                flush=True,
+            )
+            self.compare_from_id = from_id
+            self.compare_to_id = to_id
+            self.compare_before_map = before_map
+            self.compare_after_map = after_map
+            t_prep0 = time.perf_counter()
+            self._prepare_compare_temp_dirs()
+            t_prep1 = time.perf_counter()
+            t_list0 = time.perf_counter()
+            self.populate_compare_item_list()
+            t_list1 = time.perf_counter()
+            if self.compare_item_list.count() > 0:
+                self.compare_item_list.setCurrentRow(0)
+            print(
+                f"[perf] show_compare_page prep_tmp={t_prep1 - t_prep0:.3f}s "
+                f"populate_list={t_list1 - t_list0:.3f}s total={time.perf_counter() - t0:.3f}s "
+                f"targets={len(self.compare_targets)}",
+                flush=True,
+            )
+        except Exception as exc:
+            self.compare_status_label.setText(str(exc))
+            self.compare_status_label.setStyleSheet("color: #b00020;")
+        finally:
+            self._compare_pending_from_id = None
+            self._compare_pending_to_id = None
 
     def _prepare_compare_temp_dirs(self) -> None:
         self._cleanup_compare_temp_dirs()
