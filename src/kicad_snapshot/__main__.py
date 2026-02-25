@@ -525,9 +525,16 @@ def parse_version_text(raw: str) -> tuple[tuple[int, ...] | None, str]:
     return version_tuple, version_text
 
 
+def run_subprocess(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    if sys.platform.startswith("win"):
+        flags = int(kwargs.pop("creationflags", 0))
+        kwargs["creationflags"] = flags | int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return subprocess.run(cmd, **kwargs)
+
+
 def probe_kicad_cli(path: Path) -> CliCandidate | None:
     try:
-        result = subprocess.run(
+        result = run_subprocess(
             [str(path), "--version"],
             check=False,
             capture_output=True,
@@ -621,7 +628,7 @@ def likely_install_paths() -> list[Path]:
 
 def run_git(project_dir: Path, args: list[str], git_path: str | None) -> subprocess.CompletedProcess[str]:
     executable = git_path or "git"
-    return subprocess.run(
+    return run_subprocess(
         [executable, "-C", str(project_dir), *args],
         check=False,
         capture_output=True,
@@ -632,7 +639,7 @@ def run_git(project_dir: Path, args: list[str], git_path: str | None) -> subproc
 
 def run_git_bytes(project_dir: Path, args: list[str], git_path: str | None) -> subprocess.CompletedProcess[bytes]:
     executable = git_path or "git"
-    return subprocess.run(
+    return run_subprocess(
         [executable, "-C", str(project_dir), *args],
         check=False,
         capture_output=True,
@@ -848,7 +855,7 @@ def export_svg_bundle_with_kicad_cli(
 
     last_err = ""
     for cmd in commands:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=40)
+        result = run_subprocess(cmd, check=False, capture_output=True, text=True, timeout=40)
         if result.returncode == 0:
             svgs = sorted(out_dir.rglob("*.svg"))
             if svgs:
@@ -950,7 +957,7 @@ def detect_pcb_layers(cli_path: Path, pcb_path: Path) -> list[str]:
     ]
     for cmd in candidates:
         try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=10)
+            result = run_subprocess(cmd, check=False, capture_output=True, text=True, timeout=10)
         except Exception:
             continue
         if result.returncode != 0:
@@ -3704,7 +3711,7 @@ class MainWindow(QMainWindow):
         self.git_path = git_path
         self.git_path_input.setText(git_path)
         try:
-            result = subprocess.run(
+            result = run_subprocess(
                 [git_path, "--version"],
                 check=False,
                 capture_output=True,
