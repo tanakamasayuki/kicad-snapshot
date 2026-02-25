@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -2676,6 +2677,10 @@ class MainWindow(QMainWindow):
         self._compare_tmp_before_obj: tempfile.TemporaryDirectory[str] | None = None
         self._compare_tmp_after_obj: tempfile.TemporaryDirectory[str] | None = None
         self._compare_tmp_render_obj: tempfile.TemporaryDirectory[str] | None = None
+        self._compare_precache_thread: threading.Thread | None = None
+        self._compare_precache_stop = threading.Event()
+        self._compare_render_lock = threading.Lock()
+        self.compare_precache_active = False
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -2892,6 +2897,7 @@ class MainWindow(QMainWindow):
             t_list1 = time.perf_counter()
             if self.compare_item_list.count() > 0:
                 self.compare_item_list.setCurrentRow(0)
+                self._start_compare_precache()
             print(
                 f"[perf] show_compare_page prep_tmp={t_prep1 - t_prep0:.3f}s "
                 f"populate_list={t_list1 - t_list0:.3f}s total={time.perf_counter() - t0:.3f}s "
@@ -2930,6 +2936,11 @@ class MainWindow(QMainWindow):
         )
 
     def _cleanup_compare_temp_dirs(self) -> None:
+        self.compare_precache_active = False
+        self._compare_precache_stop.set()
+        if self._compare_precache_thread is not None and self._compare_precache_thread.is_alive():
+            self._compare_precache_thread.join(timeout=0.2)
+        self._compare_precache_thread = None
         for obj in [self._compare_tmp_before_obj, self._compare_tmp_after_obj, self._compare_tmp_render_obj]:
             if obj is not None:
                 obj.cleanup()
@@ -3033,6 +3044,27 @@ class MainWindow(QMainWindow):
         return f"{target.get('kind') or ''}|{target.get('path') or ''}|{target.get('layer') or ''}"
 
     def _render_compare_target(self, target: dict[str, str | None]) -> tuple[QImage, QImage, QImage]:
+        before_png, after_png, diff_png = self._ensure_compare_target_cache(target)
+        before_img = QImage(str(before_png))
+        after_img = QImage(str(after_png))
+        diff_img = QImage(str(diff_png))
+        if before_img.isNull() or after_img.isNull() or diff_img.isNull():
+            raise RuntimeError(self.t("compare_image_not_available"))
+        return before_img, after_img, diff_img
+
+    def _cache_paths_for_target(self, target: dict[str, str | None]) -> tuple[Path, Path, Path]:
+        if self.compare_render_root is None:
+            raise RuntimeError(self.t("compare_image_not_available"))
+        cache_key = hashlib.sha1(self._compare_target_key(target).encode("utf-8")).hexdigest()
+        cache_dir = self.compare_render_root / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return (
+            cache_dir / f"{cache_key}_before.png",
+            cache_dir / f"{cache_key}_after.png",
+            cache_dir / f"{cache_key}_diff.png",
+        )
+
+    def _ensure_compare_target_cache(self, target: dict[str, str | None]) -> tuple[Path, Path, Path]:
         if self.compare_before_root is None or self.compare_after_root is None or self.compare_render_root is None:
             raise RuntimeError(self.t("compare_image_not_available"))
         if self.cli_candidate is None:
@@ -3044,43 +3076,48 @@ class MainWindow(QMainWindow):
         if not isinstance(kind, str) or not isinstance(rel_path, str):
             raise RuntimeError(self.t("compare_image_not_available"))
 
-        before_src = self.compare_before_root / rel_path
-        after_src = self.compare_after_root / rel_path
-        key = re.sub(r"[^A-Za-z0-9._-]+", "_", self._compare_target_key(target))
-        cache_key = hashlib.sha1(self._compare_target_key(target).encode("utf-8")).hexdigest()
-        cache_dir = self.compare_render_root / "cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        before_png = cache_dir / f"{cache_key}_before.png"
-        after_png = cache_dir / f"{cache_key}_after.png"
-        diff_png = cache_dir / f"{cache_key}_diff.png"
+        before_png, after_png, diff_png = self._cache_paths_for_target(target)
         if before_png.exists() and after_png.exists() and diff_png.exists():
-            cached_before = QImage(str(before_png))
-            cached_after = QImage(str(after_png))
-            cached_diff = QImage(str(diff_png))
-            if not cached_before.isNull() and not cached_after.isNull() and not cached_diff.isNull():
-                return cached_before, cached_after, cached_diff
+            return before_png, after_png, diff_png
 
-        before_svg = self._export_compare_svg(before_src if before_src.exists() else None, kind, layer, self.compare_render_root / "before" / key)
-        after_svg = self._export_compare_svg(after_src if after_src.exists() else None, kind, layer, self.compare_render_root / "after" / key)
+        with self._compare_render_lock:
+            if before_png.exists() and after_png.exists() and diff_png.exists():
+                return before_png, after_png, diff_png
 
-        if before_svg is None and after_svg is None:
-            raise RuntimeError(self.t("compare_image_not_available"))
-        before_img = render_svg_to_image(before_svg) if before_svg is not None else None
-        after_img = render_svg_to_image(after_svg) if after_svg is not None else None
-        if before_img is None and after_img is None:
-            raise RuntimeError(self.t("compare_image_not_available"))
-        if before_img is None:
-            before_img = QImage(after_img.width(), after_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
-            before_img.fill(Qt.white)
-        if after_img is None:
-            after_img = QImage(before_img.width(), before_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
-            after_img.fill(Qt.white)
-        before_img, after_img = normalize_image_sizes(before_img, after_img)
-        diff_img = make_pixel_diff_image(before_img, after_img)
-        before_img.save(str(before_png), "PNG")
-        after_img.save(str(after_png), "PNG")
-        diff_img.save(str(diff_png), "PNG")
-        return before_img, after_img, diff_img
+            before_src = self.compare_before_root / rel_path
+            after_src = self.compare_after_root / rel_path
+            key = re.sub(r"[^A-Za-z0-9._-]+", "_", self._compare_target_key(target))
+            before_svg = self._export_compare_svg(
+                before_src if before_src.exists() else None,
+                kind,
+                layer,
+                self.compare_render_root / "before" / key,
+            )
+            after_svg = self._export_compare_svg(
+                after_src if after_src.exists() else None,
+                kind,
+                layer,
+                self.compare_render_root / "after" / key,
+            )
+
+            if before_svg is None and after_svg is None:
+                raise RuntimeError(self.t("compare_image_not_available"))
+            before_img = render_svg_to_image(before_svg) if before_svg is not None else None
+            after_img = render_svg_to_image(after_svg) if after_svg is not None else None
+            if before_img is None and after_img is None:
+                raise RuntimeError(self.t("compare_image_not_available"))
+            if before_img is None:
+                before_img = QImage(after_img.width(), after_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
+                before_img.fill(Qt.white)
+            if after_img is None:
+                after_img = QImage(before_img.width(), before_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
+                after_img.fill(Qt.white)
+            before_img, after_img = normalize_image_sizes(before_img, after_img)
+            diff_img = make_pixel_diff_image(before_img, after_img)
+            before_img.save(str(before_png), "PNG")
+            after_img.save(str(after_png), "PNG")
+            diff_img.save(str(diff_png), "PNG")
+        return before_png, after_png, diff_png
 
     def _export_compare_svg(self, source: Path | None, kind: str, layer: str | None, out_dir: Path) -> Path | None:
         if source is None:
@@ -3118,6 +3155,31 @@ class MainWindow(QMainWindow):
         for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
             label.clear()
             label.setText(self.t("compare_image_rendering"))
+
+    def _start_compare_precache(self) -> None:
+        if self.compare_precache_active:
+            return
+        self._compare_precache_stop.clear()
+        self.compare_precache_active = True
+        targets = list(self.compare_targets)
+        self._compare_precache_thread = threading.Thread(
+            target=self._run_compare_precache_worker,
+            args=(targets,),
+            daemon=True,
+        )
+        self._compare_precache_thread.start()
+
+    def _run_compare_precache_worker(self, targets: list[dict[str, str | None]]) -> None:
+        try:
+            for target in targets:
+                if self._compare_precache_stop.is_set():
+                    break
+                try:
+                    self._ensure_compare_target_cache(target)
+                except Exception:
+                    continue
+        finally:
+            self.compare_precache_active = False
 
     def _connect_compare_image_scroll_sync(self) -> None:
         for scroll in self.compare_image_scrolls.values():
