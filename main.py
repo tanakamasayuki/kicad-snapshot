@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,7 +15,8 @@ from typing import Iterable
 
 from platformdirs import user_config_dir
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QImage, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -32,9 +34,13 @@ from PySide6.QtWidgets import (
     QListView,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpacerItem,
+    QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -121,6 +127,28 @@ TRANSLATIONS = {
         "compare_started_title": "Compare",
         "compare_backup_title": "Backup",
         "compare_started_text": "Comparison requested.\n\nBefore: {from_item}\nAfter: {to_item}",
+        "compare_result_title": "Compare Result",
+        "compare_result_summary": "Added: {added}  Removed: {removed}  Changed: {changed}  Unchanged: {unchanged}",
+        "compare_result_files": "Changed Files",
+        "compare_result_no_diff": "No changed files.",
+        "compare_result_error": "Failed to compare: {error}",
+        "compare_close": "Close",
+        "compare_visual_title": "Visual Diff",
+        "compare_visual_file": "File",
+        "compare_visual_before": "Before",
+        "compare_visual_after": "After",
+        "compare_visual_empty": "(empty)",
+        "compare_image_title": "Image Diff",
+        "compare_image_sch": "Generate Schematic Diff",
+        "compare_image_pcb": "Generate PCB Diff",
+        "compare_image_status": "Select schematic or PCB diff generation.",
+        "compare_image_before": "Before Image",
+        "compare_image_after": "After Image",
+        "compare_image_diff": "Diff Image",
+        "compare_image_not_available": "Image diff is available for .kicad_sch/.kicad_pcb content.",
+        "compare_image_zoom_out": "Zoom Out",
+        "compare_image_zoom_in": "Zoom In",
+        "compare_image_zoom_fit": "Fit",
         "compare_backup_created": "Backup created: {path}",
         "compare_git_commit_need_msg": "Commit message is required.",
         "compare_git_ok_title": "Git",
@@ -194,6 +222,28 @@ TRANSLATIONS = {
         "compare_started_title": "比較",
         "compare_backup_title": "バックアップ",
         "compare_started_text": "比較を開始します。\n\nBefore: {from_item}\nAfter: {to_item}",
+        "compare_result_title": "比較結果",
+        "compare_result_summary": "追加: {added}  削除: {removed}  変更: {changed}  変更なし: {unchanged}",
+        "compare_result_files": "差分ファイル",
+        "compare_result_no_diff": "差分ファイルはありません。",
+        "compare_result_error": "比較に失敗しました: {error}",
+        "compare_close": "閉じる",
+        "compare_visual_title": "ビジュアル差分",
+        "compare_visual_file": "ファイル",
+        "compare_visual_before": "Before",
+        "compare_visual_after": "After",
+        "compare_visual_empty": "(空)",
+        "compare_image_title": "画像差分",
+        "compare_image_sch": "回路図差分を生成",
+        "compare_image_pcb": "PCB差分を生成",
+        "compare_image_status": "回路図またはPCBの差分生成を選択してください。",
+        "compare_image_before": "Before 画像",
+        "compare_image_after": "After 画像",
+        "compare_image_diff": "差分画像",
+        "compare_image_not_available": ".kicad_sch/.kicad_pcb が無い場合は画像差分を生成できません。",
+        "compare_image_zoom_out": "縮小",
+        "compare_image_zoom_in": "拡大",
+        "compare_image_zoom_fit": "フィット",
         "compare_backup_created": "バックアップを作成しました: {path}",
         "compare_git_commit_need_msg": "コミットメッセージを入力してください。",
         "compare_git_ok_title": "Git",
@@ -514,6 +564,16 @@ def run_git(project_dir: Path, args: list[str], git_path: str | None) -> subproc
     )
 
 
+def run_git_bytes(project_dir: Path, args: list[str], git_path: str | None) -> subprocess.CompletedProcess[bytes]:
+    executable = git_path or "git"
+    return subprocess.run(
+        [executable, "-C", str(project_dir), *args],
+        check=False,
+        capture_output=True,
+        timeout=20,
+    )
+
+
 def detect_git_repo_root(project_dir: Path, git_path: str | None) -> Path | None:
     try:
         result = run_git(project_dir, ["rev-parse", "--show-toplevel"], git_path)
@@ -547,6 +607,199 @@ def backup_whitelist_paths(project_dir: Path) -> list[Path]:
         if path.name in file_names or path.suffix in suffixes:
             selected.append(path)
     return selected
+
+
+def is_backup_target_path(rel_path: str) -> bool:
+    file_names = {"fp-lib-table", "sym-lib-table", "design-block-lib-table"}
+    suffixes = {
+        ".kicad_pro",
+        ".kicad_sch",
+        ".kicad_pcb",
+        ".kicad_sym",
+        ".kicad_mod",
+        ".kicad_dru",
+        ".kicad_wks",
+    }
+
+    normalized = rel_path.replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    base_name = Path(normalized).name
+    if base_name in file_names:
+        return True
+    return Path(base_name).suffix in suffixes
+
+
+def build_current_project_map(project_file: Path) -> dict[str, bytes]:
+    project_dir = project_file.resolve().parent
+    result: dict[str, bytes] = {}
+    for path in backup_whitelist_paths(project_dir):
+        rel = path.relative_to(project_dir).as_posix()
+        try:
+            result[rel] = path.read_bytes()
+        except OSError:
+            continue
+    return result
+
+
+def build_backup_zip_map(zip_path: Path) -> dict[str, bytes]:
+    result: dict[str, bytes] = {}
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for name in zf.namelist():
+            normalized = name.replace("\\", "/").strip("/")
+            if not normalized or normalized.endswith("/"):
+                continue
+            if not is_backup_target_path(normalized):
+                continue
+            try:
+                result[normalized] = zf.read(name)
+            except KeyError:
+                continue
+    return result
+
+
+def build_git_commit_map(project_file: Path, commit_hash: str, git_path: str | None) -> dict[str, bytes]:
+    project_dir = project_file.resolve().parent
+    repo_root = detect_git_repo_root(project_dir, git_path)
+    if repo_root is None:
+        return {}
+
+    try:
+        rel_project = project_dir.relative_to(repo_root).as_posix()
+    except ValueError:
+        rel_project = "."
+
+    args = ["ls-tree", "-r", "--name-only", commit_hash]
+    if rel_project != ".":
+        args.extend(["--", rel_project])
+    list_result = run_git(repo_root, args, git_path)
+    if list_result.returncode != 0:
+        return {}
+
+    result: dict[str, bytes] = {}
+    for line in (list_result.stdout or "").splitlines():
+        repo_path = line.strip()
+        if not repo_path:
+            continue
+        if rel_project != ".":
+            prefix = rel_project + "/"
+            if not repo_path.startswith(prefix):
+                continue
+            rel_path = repo_path[len(prefix):]
+        else:
+            rel_path = repo_path
+        if not is_backup_target_path(rel_path):
+            continue
+
+        show_result = run_git_bytes(repo_root, ["show", f"{commit_hash}:{repo_path}"], git_path)
+        if show_result.returncode != 0:
+            continue
+        result[rel_path] = show_result.stdout
+    return result
+
+
+def compare_file_maps(before: dict[str, bytes], after: dict[str, bytes]) -> tuple[list[str], list[str], list[str], list[str]]:
+    before_keys = set(before.keys())
+    after_keys = set(after.keys())
+    added = sorted(after_keys - before_keys)
+    removed = sorted(before_keys - after_keys)
+    common = sorted(before_keys & after_keys)
+    changed: list[str] = []
+    unchanged: list[str] = []
+    for key in common:
+        if before[key] == after[key]:
+            unchanged.append(key)
+        else:
+            changed.append(key)
+    return added, removed, changed, unchanged
+
+
+def write_file_map(root: Path, file_map: dict[str, bytes]) -> None:
+    for rel, data in file_map.items():
+        out_path = root / rel
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(data)
+
+
+def first_matching_file(root: Path, suffix: str) -> Path | None:
+    matches = sorted(root.rglob(f"*{suffix}"))
+    if not matches:
+        return None
+    return matches[0]
+
+
+def export_svg_with_kicad_cli(cli_path: Path, source_file: Path, out_dir: Path, kind: str) -> Path:
+    if kind == "sch":
+        cmd = [str(cli_path), "sch", "export", "svg", str(source_file), "-o", str(out_dir)]
+    elif kind == "pcb":
+        cmd = [str(cli_path), "pcb", "export", "svg", str(source_file), "-o", str(out_dir)]
+    else:
+        raise RuntimeError(f"Unsupported kind: {kind}")
+
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=40)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(err or "kicad-cli export failed")
+
+    svgs = sorted(out_dir.rglob("*.svg"))
+    if not svgs:
+        raise RuntimeError("No SVG exported by kicad-cli")
+    return svgs[0]
+
+
+def render_svg_to_image(svg_path: Path) -> QImage:
+    renderer = QSvgRenderer(str(svg_path))
+    if not renderer.isValid():
+        raise RuntimeError(f"Invalid SVG: {svg_path}")
+
+    size = renderer.defaultSize()
+    width = max(1, min(size.width() if size.width() > 0 else 1400, 2000))
+    height = max(1, min(size.height() if size.height() > 0 else 1000, 2000))
+
+    image = QImage(width, height, QImage.Format_ARGB32)
+    image.fill(Qt.white)
+    painter = QPainter(image)
+    renderer.render(painter)
+    painter.end()
+    return image
+
+
+def pad_image(image: QImage, width: int, height: int) -> QImage:
+    if image.width() == width and image.height() == height:
+        return image
+    out = QImage(width, height, QImage.Format_ARGB32)
+    out.fill(Qt.white)
+    painter = QPainter(out)
+    painter.drawImage(0, 0, image)
+    painter.end()
+    return out
+
+
+def make_pixel_diff_image(before: QImage, after: QImage) -> QImage:
+    width = max(before.width(), after.width())
+    height = max(before.height(), after.height())
+    b = pad_image(before, width, height)
+    a = pad_image(after, width, height)
+
+    diff = QImage(width, height, QImage.Format_ARGB32)
+    diff.fill(Qt.white)
+
+    for y in range(height):
+        for x in range(width):
+            bp = b.pixel(x, y)
+            ap = a.pixel(x, y)
+            if bp == ap:
+                diff.setPixel(x, y, ap)
+            else:
+                # Highlight changed pixels in red.
+                diff.setPixel(x, y, 0xFFFF4040)
+    return diff
+
+
+def normalize_image_sizes(before: QImage, after: QImage) -> tuple[QImage, QImage]:
+    width = max(before.width(), after.width())
+    height = max(before.height(), after.height())
+    return pad_image(before, width, height), pad_image(after, width, height)
 
 
 def sanitize_memo_for_filename(memo: str) -> str:
@@ -1003,13 +1256,73 @@ class SnapshotCompareDialog(QDialog):
             QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_same"))
             return
 
-        from_item = self.compare_from_combo.currentText()
-        to_item = self.compare_to_combo.currentText()
-        QMessageBox.information(
-            self,
-            self.t("compare_started_title"),
-            self.t("compare_started_text", from_item=from_item, to_item=to_item),
+        if not isinstance(from_id, str) or not isinstance(to_id, str):
+            QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
+            return
+
+        try:
+            before_map = self._load_source_map(from_id)
+            after_map = self._load_source_map(to_id)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                self.t("compare_result_title"),
+                self.t("compare_result_error", error=str(exc)),
+            )
+            return
+
+        added, removed, changed, unchanged = compare_file_maps(before_map, after_map)
+        dialog = CompareResultDialog(
+            title=self.t("compare_result_title"),
+            summary=self.t(
+                "compare_result_summary",
+                added=str(len(added)),
+                removed=str(len(removed)),
+                changed=str(len(changed)),
+                unchanged=str(len(unchanged)),
+            ),
+            files_title=self.t("compare_result_files"),
+            no_diff_text=self.t("compare_result_no_diff"),
+            close_text=self.t("compare_close"),
+            visual_title=self.t("compare_visual_title"),
+            visual_file_label=self.t("compare_visual_file"),
+            visual_before_label=self.t("compare_visual_before"),
+            visual_after_label=self.t("compare_visual_after"),
+            visual_empty_text=self.t("compare_visual_empty"),
+            image_title=self.t("compare_image_title"),
+            image_sch_text=self.t("compare_image_sch"),
+            image_pcb_text=self.t("compare_image_pcb"),
+            image_status_text=self.t("compare_image_status"),
+            image_before_text=self.t("compare_image_before"),
+            image_after_text=self.t("compare_image_after"),
+            image_diff_text=self.t("compare_image_diff"),
+            image_not_available_text=self.t("compare_image_not_available"),
+            image_zoom_out_text=self.t("compare_image_zoom_out"),
+            image_zoom_in_text=self.t("compare_image_zoom_in"),
+            image_zoom_fit_text=self.t("compare_image_zoom_fit"),
+            added=added,
+            removed=removed,
+            changed=changed,
+            before_map=before_map,
+            after_map=after_map,
+            cli_path=self.cli_path,
+            parent=self,
         )
+        dialog.exec()
+
+    def _load_source_map(self, source_id: str) -> dict[str, bytes]:
+        if source_id == "__current_project__":
+            return build_current_project_map(self.project_file)
+
+        item = next((it for it in self.filtered_items if it.identifier == source_id), None)
+        if item is None:
+            raise RuntimeError(f"Unknown source id: {source_id}")
+
+        if item.source == "backup":
+            return build_backup_zip_map(Path(item.identifier))
+        if item.source == "git":
+            return build_git_commit_map(self.project_file, item.identifier, self.git_path)
+        raise RuntimeError(f"Unsupported source type: {item.source}")
 
     def git_commit(self) -> None:
         message = self.git_message.text().strip()
@@ -1052,6 +1365,388 @@ class SnapshotCompareDialog(QDialog):
             return
         QMessageBox.information(self, self.t("compare_git_ok_title"), self.t("compare_git_pull_ok"))
         self.refresh_data()
+
+
+class CompareResultDialog(QDialog):
+    def __init__(
+        self,
+        title: str,
+        summary: str,
+        files_title: str,
+        no_diff_text: str,
+        close_text: str,
+        visual_title: str,
+        visual_file_label: str,
+        visual_before_label: str,
+        visual_after_label: str,
+        visual_empty_text: str,
+        image_title: str,
+        image_sch_text: str,
+        image_pcb_text: str,
+        image_status_text: str,
+        image_before_text: str,
+        image_after_text: str,
+        image_diff_text: str,
+        image_not_available_text: str,
+        image_zoom_out_text: str,
+        image_zoom_in_text: str,
+        image_zoom_fit_text: str,
+        added: list[str],
+        removed: list[str],
+        changed: list[str],
+        before_map: dict[str, bytes],
+        after_map: dict[str, bytes],
+        cli_path: Path,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(760, 520)
+        self.before_map = before_map
+        self.after_map = after_map
+        self.visual_empty_text = visual_empty_text
+        self.cli_path = cli_path
+        self.image_not_available_text = image_not_available_text
+        self.image_zoom_mode = "fit"
+        self.image_zoom_scale = 1.0
+        self.before_image_raw: QImage | None = None
+        self.after_image_raw: QImage | None = None
+        self.diff_image_raw: QImage | None = None
+        self.image_scrolls: dict[str, QScrollArea] = {}
+        self._syncing_scroll = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        tabs = QTabWidget()
+        root.addWidget(tabs, 1)
+
+        summary_tab = QWidget()
+        summary_layout = QVBoxLayout(summary_tab)
+        summary_layout.setContentsMargins(8, 8, 8, 8)
+        summary_layout.setSpacing(10)
+
+        summary_label = QLabel(summary)
+        summary_label.setWordWrap(True)
+        summary_label.setStyleSheet("font-weight: 600;")
+        summary_layout.addWidget(summary_label)
+
+        files_title_label = QLabel(files_title)
+        files_title_label.setStyleSheet("color: #444444;")
+        summary_layout.addWidget(files_title_label)
+
+        self.list_widget = QListWidget()
+        summary_layout.addWidget(self.list_widget, 1)
+
+        for path in changed:
+            self.list_widget.addItem(f"~ {path}")
+        for path in added:
+            self.list_widget.addItem(f"+ {path}")
+        for path in removed:
+            self.list_widget.addItem(f"- {path}")
+
+        if self.list_widget.count() == 0:
+            self.list_widget.addItem(no_diff_text)
+
+        tabs.addTab(summary_tab, files_title)
+
+        visual_tab = QWidget()
+        visual_layout = QVBoxLayout(visual_tab)
+        visual_layout.setContentsMargins(8, 8, 8, 8)
+        visual_layout.setSpacing(8)
+
+        visual_header = QHBoxLayout()
+        visual_file_label_widget = QLabel(visual_file_label)
+        self.visual_file_combo = QComboBox()
+        visual_header.addWidget(visual_file_label_widget)
+        visual_header.addWidget(self.visual_file_combo, 1)
+        visual_layout.addLayout(visual_header)
+
+        split = QSplitter()
+        before_wrap = QWidget()
+        before_layout = QVBoxLayout(before_wrap)
+        before_layout.setContentsMargins(0, 0, 0, 0)
+        before_layout.setSpacing(4)
+        before_title = QLabel(visual_before_label)
+        self.before_text = QPlainTextEdit()
+        self.before_text.setReadOnly(True)
+        before_layout.addWidget(before_title)
+        before_layout.addWidget(self.before_text, 1)
+
+        after_wrap = QWidget()
+        after_layout = QVBoxLayout(after_wrap)
+        after_layout.setContentsMargins(0, 0, 0, 0)
+        after_layout.setSpacing(4)
+        after_title = QLabel(visual_after_label)
+        self.after_text = QPlainTextEdit()
+        self.after_text.setReadOnly(True)
+        after_layout.addWidget(after_title)
+        after_layout.addWidget(self.after_text, 1)
+
+        split.addWidget(before_wrap)
+        split.addWidget(after_wrap)
+        visual_layout.addWidget(split, 1)
+        tabs.addTab(visual_tab, visual_title)
+
+        image_tab = QWidget()
+        image_layout = QVBoxLayout(image_tab)
+        image_layout.setContentsMargins(8, 8, 8, 8)
+        image_layout.setSpacing(8)
+        image_button_row = QHBoxLayout()
+        self.image_sch_btn = QPushButton(image_sch_text)
+        self.image_pcb_btn = QPushButton(image_pcb_text)
+        self.image_zoom_out_btn = QPushButton(image_zoom_out_text)
+        self.image_zoom_in_btn = QPushButton(image_zoom_in_text)
+        self.image_zoom_fit_btn = QPushButton(image_zoom_fit_text)
+        self.image_sch_btn.clicked.connect(lambda: self.generate_image_diff("sch"))
+        self.image_pcb_btn.clicked.connect(lambda: self.generate_image_diff("pcb"))
+        self.image_zoom_out_btn.clicked.connect(self.zoom_out_images)
+        self.image_zoom_in_btn.clicked.connect(self.zoom_in_images)
+        self.image_zoom_fit_btn.clicked.connect(self.zoom_fit_images)
+        image_button_row.addWidget(self.image_sch_btn)
+        image_button_row.addWidget(self.image_pcb_btn)
+        image_button_row.addWidget(self.image_zoom_out_btn)
+        image_button_row.addWidget(self.image_zoom_in_btn)
+        image_button_row.addWidget(self.image_zoom_fit_btn)
+        image_button_row.addStretch(1)
+        image_layout.addLayout(image_button_row)
+
+        self.image_status = QLabel(image_status_text)
+        self.image_status.setWordWrap(True)
+        self.image_status.setStyleSheet("color: #666666;")
+        image_layout.addWidget(self.image_status)
+
+        self.before_image_label = QLabel()
+        self.after_image_label = QLabel()
+        self.diff_image_label = QLabel()
+        self.before_image_label.setAlignment(Qt.AlignCenter)
+        self.after_image_label.setAlignment(Qt.AlignCenter)
+        self.diff_image_label.setAlignment(Qt.AlignCenter)
+        self.before_image_label.setText(image_before_text)
+        self.after_image_label.setText(image_after_text)
+        self.diff_image_label.setText(image_diff_text)
+        self.image_tabs = QTabWidget()
+        self.image_tabs.addTab(
+            self._wrap_image_label("diff", image_diff_text, self.diff_image_label),
+            image_diff_text,
+        )
+        self.image_tabs.addTab(
+            self._wrap_image_label("before", image_before_text, self.before_image_label),
+            image_before_text,
+        )
+        self.image_tabs.addTab(
+            self._wrap_image_label("after", image_after_text, self.after_image_label),
+            image_after_text,
+        )
+        image_layout.addWidget(self.image_tabs, 1)
+        tabs.addTab(image_tab, image_title)
+        self._connect_image_scroll_sync()
+
+        diff_paths = [*changed, *added, *removed]
+        for path in diff_paths:
+            self.visual_file_combo.addItem(path, path)
+        self.visual_file_combo.currentIndexChanged.connect(self.on_visual_file_changed)
+        if self.visual_file_combo.count() > 0:
+            self.visual_file_combo.setCurrentIndex(0)
+            self.on_visual_file_changed(0)
+        else:
+            self.before_text.setPlainText(self.visual_empty_text)
+            self.after_text.setPlainText(self.visual_empty_text)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close_btn = QPushButton(close_text)
+        close_btn.clicked.connect(self.accept)
+        actions.addWidget(close_btn)
+        root.addLayout(actions)
+
+    def _wrap_image_label(self, key: str, title: str, label: QLabel) -> QWidget:
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        title_label = QLabel(title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        scroll.setWidget(label)
+        self.image_scrolls[key] = scroll
+        layout.addWidget(title_label)
+        layout.addWidget(scroll, 1)
+        return wrap
+
+    def _connect_image_scroll_sync(self) -> None:
+        for scroll in self.image_scrolls.values():
+            scroll.horizontalScrollBar().valueChanged.connect(self.on_image_scroll_changed)
+            scroll.verticalScrollBar().valueChanged.connect(self.on_image_scroll_changed)
+
+    def on_image_scroll_changed(self, _: int) -> None:
+        if self._syncing_scroll:
+            return
+
+        source_bar = self.sender()
+        if source_bar is None:
+            return
+
+        bars = []
+        for scroll in self.image_scrolls.values():
+            bars.append(scroll.horizontalScrollBar())
+            bars.append(scroll.verticalScrollBar())
+        if source_bar not in bars:
+            return
+
+        self._syncing_scroll = True
+        try:
+            source_max = source_bar.maximum()
+            source_value = source_bar.value()
+            ratio = 0.0 if source_max <= 0 else source_value / source_max
+            source_is_vertical = source_bar.orientation() == Qt.Vertical
+
+            for scroll in self.image_scrolls.values():
+                target_bar = scroll.verticalScrollBar() if source_is_vertical else scroll.horizontalScrollBar()
+                if target_bar is source_bar:
+                    continue
+                target_max = target_bar.maximum()
+                target_value = int(round(ratio * target_max)) if target_max > 0 else 0
+                target_bar.setValue(target_value)
+        finally:
+            self._syncing_scroll = False
+
+    def on_visual_file_changed(self, _: int) -> None:
+        path = self.visual_file_combo.currentData()
+        if not isinstance(path, str):
+            self.before_text.setPlainText(self.visual_empty_text)
+            self.after_text.setPlainText(self.visual_empty_text)
+            return
+        before_raw = self.before_map.get(path)
+        after_raw = self.after_map.get(path)
+        self.before_text.setPlainText(self._decode_bytes(before_raw))
+        self.after_text.setPlainText(self._decode_bytes(after_raw))
+
+    def _decode_bytes(self, data: bytes | None) -> str:
+        if data is None:
+            return self.visual_empty_text
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode("utf-8", errors="replace")
+
+    def generate_image_diff(self, kind: str) -> None:
+        try:
+            before_img, after_img, diff_img = self._build_image_diff(kind)
+        except Exception as exc:
+            self.image_status.setText(str(exc))
+            self.image_status.setStyleSheet("color: #b00020;")
+            return
+
+        self.image_status.setText("OK")
+        self.image_status.setStyleSheet("color: #2b7a0b;")
+        self.before_image_raw = before_img
+        self.after_image_raw = after_img
+        self.diff_image_raw = diff_img
+        self.image_zoom_scale = 1.0
+        self.zoom_fit_images()
+
+    def _build_image_diff(self, kind: str) -> tuple[QImage, QImage, QImage]:
+        suffix = ".kicad_sch" if kind == "sch" else ".kicad_pcb"
+
+        if not any(path.endswith(suffix) for path in self.before_map) or not any(path.endswith(suffix) for path in self.after_map):
+            raise RuntimeError(self.image_not_available_text)
+
+        with tempfile.TemporaryDirectory(prefix="ksnap_before_") as before_tmp, tempfile.TemporaryDirectory(
+            prefix="ksnap_after_"
+        ) as after_tmp, tempfile.TemporaryDirectory(prefix="ksnap_svg_before_") as out_before_tmp, tempfile.TemporaryDirectory(
+            prefix="ksnap_svg_after_"
+        ) as out_after_tmp:
+            before_root = Path(before_tmp)
+            after_root = Path(after_tmp)
+            out_before = Path(out_before_tmp)
+            out_after = Path(out_after_tmp)
+            write_file_map(before_root, self.before_map)
+            write_file_map(after_root, self.after_map)
+
+            before_src = first_matching_file(before_root, suffix)
+            after_src = first_matching_file(after_root, suffix)
+            if before_src is None or after_src is None:
+                raise RuntimeError(self.image_not_available_text)
+
+            before_svg = export_svg_with_kicad_cli(self.cli_path, before_src, out_before, kind)
+            after_svg = export_svg_with_kicad_cli(self.cli_path, after_src, out_after, kind)
+
+            before_img = render_svg_to_image(before_svg)
+            after_img = render_svg_to_image(after_svg)
+            before_img, after_img = normalize_image_sizes(before_img, after_img)
+            diff_img = make_pixel_diff_image(before_img, after_img)
+            return before_img, after_img, diff_img
+
+    def zoom_fit_images(self) -> None:
+        self.image_zoom_mode = "fit"
+        self._render_image_labels()
+
+    def zoom_in_images(self) -> None:
+        self.image_zoom_mode = "manual"
+        self.image_zoom_scale = min(self.image_zoom_scale * 1.25, 8.0)
+        self._render_image_labels()
+
+    def zoom_out_images(self) -> None:
+        self.image_zoom_mode = "manual"
+        self.image_zoom_scale = max(self.image_zoom_scale / 1.25, 0.1)
+        self._render_image_labels()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.image_zoom_mode == "fit":
+            self._render_image_labels()
+
+    def _render_image_labels(self) -> None:
+        common_fit_scale = None
+        if self.image_zoom_mode == "fit":
+            common_fit_scale = self._compute_common_fit_scale()
+        self._set_image_for_key("before", self.before_image_label, self.before_image_raw, common_fit_scale)
+        self._set_image_for_key("after", self.after_image_label, self.after_image_raw, common_fit_scale)
+        self._set_image_for_key("diff", self.diff_image_label, self.diff_image_raw, common_fit_scale)
+
+    def _compute_common_fit_scale(self) -> float:
+        images = [img for img in [self.before_image_raw, self.after_image_raw, self.diff_image_raw] if img is not None]
+        if not images:
+            return 1.0
+        max_w = max(img.width() for img in images)
+        max_h = max(img.height() for img in images)
+        if max_w <= 0 or max_h <= 0:
+            return 1.0
+
+        scroll = self.image_scrolls.get("diff") or next(iter(self.image_scrolls.values()), None)
+        if scroll is None:
+            return 1.0
+        vp = scroll.viewport().size()
+        avail_w = max(1, vp.width())
+        avail_h = max(1, vp.height())
+        scale = min(avail_w / max_w, avail_h / max_h)
+        return max(0.05, min(scale, 8.0))
+
+    def _set_image_for_key(
+        self,
+        key: str,
+        label: QLabel,
+        image: QImage | None,
+        common_fit_scale: float | None = None,
+    ) -> None:
+        if image is None:
+            return
+        pixmap = QPixmap.fromImage(image)
+        if self.image_zoom_mode == "fit":
+            scale = common_fit_scale if common_fit_scale is not None else 1.0
+            width = max(1, int(pixmap.width() * scale))
+            height = max(1, int(pixmap.height() * scale))
+            pixmap = pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        else:
+            width = max(1, int(pixmap.width() * self.image_zoom_scale))
+            height = max(1, int(pixmap.height() * self.image_zoom_scale))
+            pixmap = pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(pixmap)
+        label.resize(pixmap.size())
 
 
 class MainWindow(QMainWindow):
