@@ -139,9 +139,12 @@ TRANSLATIONS = {
         "compare_visual_after": "After",
         "compare_visual_empty": "(empty)",
         "compare_image_title": "Image Diff",
-        "compare_image_sch": "Generate Schematic Diff",
-        "compare_image_pcb": "Generate PCB Diff",
-        "compare_image_status": "Select schematic or PCB diff generation.",
+        "compare_image_target": "Target",
+        "compare_image_render": "Render",
+        "compare_image_status": "Select a sheet/page target and render.",
+        "compare_image_no_targets": "No renderable sheet/page target found.",
+        "compare_image_missing_side": "This target does not exist on one side. Missing side is shown as empty.",
+        "compare_image_pcb_board": "PCB / board",
         "compare_image_before": "Before Image",
         "compare_image_after": "After Image",
         "compare_image_diff": "Diff Image",
@@ -234,9 +237,12 @@ TRANSLATIONS = {
         "compare_visual_after": "After",
         "compare_visual_empty": "(空)",
         "compare_image_title": "画像差分",
-        "compare_image_sch": "回路図差分を生成",
-        "compare_image_pcb": "PCB差分を生成",
-        "compare_image_status": "回路図またはPCBの差分生成を選択してください。",
+        "compare_image_target": "対象",
+        "compare_image_render": "描画",
+        "compare_image_status": "シート/ページを選択して描画してください。",
+        "compare_image_no_targets": "描画可能なシート/ページが見つかりません。",
+        "compare_image_missing_side": "片側に存在しないため、無い側は空表示になります。",
+        "compare_image_pcb_board": "PCB / 全体",
         "compare_image_before": "Before 画像",
         "compare_image_after": "After 画像",
         "compare_image_diff": "差分画像",
@@ -728,23 +734,52 @@ def first_matching_file(root: Path, suffix: str) -> Path | None:
     return matches[0]
 
 
-def export_svg_with_kicad_cli(cli_path: Path, source_file: Path, out_dir: Path, kind: str) -> Path:
+def export_svg_bundle_with_kicad_cli(cli_path: Path, source_file: Path, out_dir: Path, kind: str) -> list[Path]:
     if kind == "sch":
-        cmd = [str(cli_path), "sch", "export", "svg", str(source_file), "-o", str(out_dir)]
+        commands = [
+            [str(cli_path), "sch", "export", "svg", str(source_file), "-o", str(out_dir)],
+        ]
     elif kind == "pcb":
-        cmd = [str(cli_path), "pcb", "export", "svg", str(source_file), "-o", str(out_dir)]
+        # Try broad layer sets first to get a board-wide render on varying KiCad versions.
+        commands = [
+            [
+                str(cli_path),
+                "pcb",
+                "export",
+                "svg",
+                "--layers",
+                "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts",
+                str(source_file),
+                "-o",
+                str(out_dir),
+            ],
+            [
+                str(cli_path),
+                "pcb",
+                "export",
+                "svg",
+                "--layers",
+                "F.Cu,B.Cu",
+                str(source_file),
+                "-o",
+                str(out_dir),
+            ],
+            [str(cli_path), "pcb", "export", "svg", str(source_file), "-o", str(out_dir)],
+        ]
     else:
         raise RuntimeError(f"Unsupported kind: {kind}")
 
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=40)
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(err or "kicad-cli export failed")
-
-    svgs = sorted(out_dir.rglob("*.svg"))
-    if not svgs:
-        raise RuntimeError("No SVG exported by kicad-cli")
-    return svgs[0]
+    last_err = ""
+    for cmd in commands:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=40)
+        if result.returncode == 0:
+            svgs = sorted(out_dir.rglob("*.svg"))
+            if svgs:
+                return svgs
+            last_err = "No SVG exported by kicad-cli"
+        else:
+            last_err = (result.stderr or result.stdout or "").strip() or "kicad-cli export failed"
+    raise RuntimeError(last_err or "kicad-cli export failed")
 
 
 def render_svg_to_image(svg_path: Path) -> QImage:
@@ -1290,9 +1325,11 @@ class SnapshotCompareDialog(QDialog):
             visual_after_label=self.t("compare_visual_after"),
             visual_empty_text=self.t("compare_visual_empty"),
             image_title=self.t("compare_image_title"),
-            image_sch_text=self.t("compare_image_sch"),
-            image_pcb_text=self.t("compare_image_pcb"),
+            image_target_text=self.t("compare_image_target"),
+            image_render_text=self.t("compare_image_render"),
             image_status_text=self.t("compare_image_status"),
+            image_no_targets_text=self.t("compare_image_no_targets"),
+            image_missing_side_text=self.t("compare_image_missing_side"),
             image_before_text=self.t("compare_image_before"),
             image_after_text=self.t("compare_image_after"),
             image_diff_text=self.t("compare_image_diff"),
@@ -1381,9 +1418,11 @@ class CompareResultDialog(QDialog):
         visual_after_label: str,
         visual_empty_text: str,
         image_title: str,
-        image_sch_text: str,
-        image_pcb_text: str,
+        image_target_text: str,
+        image_render_text: str,
         image_status_text: str,
+        image_no_targets_text: str,
+        image_missing_side_text: str,
         image_before_text: str,
         image_after_text: str,
         image_diff_text: str,
@@ -1407,6 +1446,9 @@ class CompareResultDialog(QDialog):
         self.visual_empty_text = visual_empty_text
         self.cli_path = cli_path
         self.image_not_available_text = image_not_available_text
+        self.image_no_targets_text = image_no_targets_text
+        self.image_missing_side_text = image_missing_side_text
+        self.image_status_default_text = image_status_text
         self.image_zoom_mode = "fit"
         self.image_zoom_scale = 1.0
         self.before_image_raw: QImage | None = None
@@ -1414,6 +1456,13 @@ class CompareResultDialog(QDialog):
         self.diff_image_raw: QImage | None = None
         self.image_scrolls: dict[str, QScrollArea] = {}
         self._syncing_scroll = False
+        self.image_targets: list[tuple[str, str]] = []
+        self.before_svg_map: dict[str, Path] = {}
+        self.after_svg_map: dict[str, Path] = {}
+        self._tmp_before_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+        self._tmp_after_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+        self._tmp_svg_before_obj: tempfile.TemporaryDirectory[str] | None = None
+        self._tmp_svg_after_obj: tempfile.TemporaryDirectory[str] | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
@@ -1494,18 +1543,19 @@ class CompareResultDialog(QDialog):
         image_layout.setContentsMargins(8, 8, 8, 8)
         image_layout.setSpacing(8)
         image_button_row = QHBoxLayout()
-        self.image_sch_btn = QPushButton(image_sch_text)
-        self.image_pcb_btn = QPushButton(image_pcb_text)
+        self.image_target_label = QLabel(image_target_text)
+        self.image_target_combo = QComboBox()
+        self.image_render_btn = QPushButton(image_render_text)
         self.image_zoom_out_btn = QPushButton(image_zoom_out_text)
         self.image_zoom_in_btn = QPushButton(image_zoom_in_text)
         self.image_zoom_fit_btn = QPushButton(image_zoom_fit_text)
-        self.image_sch_btn.clicked.connect(lambda: self.generate_image_diff("sch"))
-        self.image_pcb_btn.clicked.connect(lambda: self.generate_image_diff("pcb"))
+        self.image_render_btn.clicked.connect(self.generate_image_diff_for_selected_target)
         self.image_zoom_out_btn.clicked.connect(self.zoom_out_images)
         self.image_zoom_in_btn.clicked.connect(self.zoom_in_images)
         self.image_zoom_fit_btn.clicked.connect(self.zoom_fit_images)
-        image_button_row.addWidget(self.image_sch_btn)
-        image_button_row.addWidget(self.image_pcb_btn)
+        image_button_row.addWidget(self.image_target_label)
+        image_button_row.addWidget(self.image_target_combo, 1)
+        image_button_row.addWidget(self.image_render_btn)
         image_button_row.addWidget(self.image_zoom_out_btn)
         image_button_row.addWidget(self.image_zoom_in_btn)
         image_button_row.addWidget(self.image_zoom_fit_btn)
@@ -1553,6 +1603,7 @@ class CompareResultDialog(QDialog):
         else:
             self.before_text.setPlainText(self.visual_empty_text)
             self.after_text.setPlainText(self.visual_empty_text)
+        self.prepare_image_targets()
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -1633,9 +1684,90 @@ class CompareResultDialog(QDialog):
         except UnicodeDecodeError:
             return data.decode("utf-8", errors="replace")
 
-    def generate_image_diff(self, kind: str) -> None:
+    def prepare_image_targets(self) -> None:
+        self.image_target_combo.clear()
+        self.image_targets.clear()
+        self.before_svg_map.clear()
+        self.after_svg_map.clear()
+        self._cleanup_temp_dirs()
+
         try:
-            before_img, after_img, diff_img = self._build_image_diff(kind)
+            self._tmp_before_dir_obj = tempfile.TemporaryDirectory(prefix="ksnap_before_")
+            self._tmp_after_dir_obj = tempfile.TemporaryDirectory(prefix="ksnap_after_")
+            self._tmp_svg_before_obj = tempfile.TemporaryDirectory(prefix="ksnap_svg_before_")
+            self._tmp_svg_after_obj = tempfile.TemporaryDirectory(prefix="ksnap_svg_after_")
+
+            before_root = Path(self._tmp_before_dir_obj.name)
+            after_root = Path(self._tmp_after_dir_obj.name)
+            out_before = Path(self._tmp_svg_before_obj.name)
+            out_after = Path(self._tmp_svg_after_obj.name)
+
+            write_file_map(before_root, self.before_map)
+            write_file_map(after_root, self.after_map)
+
+            self.before_svg_map.update(self._export_side_svgs(before_root, out_before))
+            self.after_svg_map.update(self._export_side_svgs(after_root, out_after))
+
+            all_keys = sorted(set(self.before_svg_map.keys()) | set(self.after_svg_map.keys()))
+            for key in all_keys:
+                kind, rel = key.split("|", 1)
+                if kind == "pcb" and rel == "__board__":
+                    label = self.t("compare_image_pcb_board")
+                else:
+                    prefix = "SCH" if kind == "sch" else "PCB"
+                    label = f"{prefix} / {rel}"
+                self.image_targets.append((key, label))
+                self.image_target_combo.addItem(label, key)
+
+            if self.image_target_combo.count() == 0:
+                self.image_status.setText(self.image_no_targets_text)
+                self.image_status.setStyleSheet("color: #9a6700;")
+            else:
+                self.image_status.setText(self.image_status_default_text)
+                self.image_status.setStyleSheet("color: #666666;")
+        except Exception as exc:
+            self.image_status.setText(str(exc))
+            self.image_status.setStyleSheet("color: #b00020;")
+
+    def _export_side_svgs(self, source_root: Path, out_root: Path) -> dict[str, Path]:
+        result: dict[str, Path] = {}
+        sch_src = first_matching_file(source_root, ".kicad_sch")
+        if sch_src is not None:
+            sch_out = out_root / "sch"
+            sch_out.mkdir(parents=True, exist_ok=True)
+            try:
+                for svg in export_svg_bundle_with_kicad_cli(self.cli_path, sch_src, sch_out, "sch"):
+                    rel = svg.relative_to(sch_out).as_posix()
+                    result[f"sch|{rel}"] = svg
+            except Exception:
+                # Keep other targets available even if schematic export fails.
+                pass
+
+        pcb_src = first_matching_file(source_root, ".kicad_pcb")
+        if pcb_src is not None:
+            pcb_out = out_root / "pcb"
+            pcb_out.mkdir(parents=True, exist_ok=True)
+            try:
+                pcb_svgs = export_svg_bundle_with_kicad_cli(self.cli_path, pcb_src, pcb_out, "pcb")
+                for svg in pcb_svgs:
+                    rel = svg.relative_to(pcb_out).as_posix()
+                    result[f"pcb|{rel}"] = svg
+                # Also expose a stable board-level target (first exported SVG as primary).
+                if pcb_svgs:
+                    result["pcb|__board__"] = pcb_svgs[0]
+            except Exception:
+                # Keep other targets available even if PCB export fails.
+                pass
+        return result
+
+    def generate_image_diff_for_selected_target(self) -> None:
+        key = self.image_target_combo.currentData()
+        if not isinstance(key, str):
+            self.image_status.setText(self.image_no_targets_text)
+            self.image_status.setStyleSheet("color: #9a6700;")
+            return
+        try:
+            before_img, after_img, diff_img = self._build_image_diff_for_target(key)
         except Exception as exc:
             self.image_status.setText(str(exc))
             self.image_status.setStyleSheet("color: #b00020;")
@@ -1649,37 +1781,31 @@ class CompareResultDialog(QDialog):
         self.image_zoom_scale = 1.0
         self.zoom_fit_images()
 
-    def _build_image_diff(self, kind: str) -> tuple[QImage, QImage, QImage]:
-        suffix = ".kicad_sch" if kind == "sch" else ".kicad_pcb"
-
-        if not any(path.endswith(suffix) for path in self.before_map) or not any(path.endswith(suffix) for path in self.after_map):
+    def _build_image_diff_for_target(self, target_key: str) -> tuple[QImage, QImage, QImage]:
+        before_svg = self.before_svg_map.get(target_key)
+        after_svg = self.after_svg_map.get(target_key)
+        if before_svg is None and after_svg is None:
             raise RuntimeError(self.image_not_available_text)
 
-        with tempfile.TemporaryDirectory(prefix="ksnap_before_") as before_tmp, tempfile.TemporaryDirectory(
-            prefix="ksnap_after_"
-        ) as after_tmp, tempfile.TemporaryDirectory(prefix="ksnap_svg_before_") as out_before_tmp, tempfile.TemporaryDirectory(
-            prefix="ksnap_svg_after_"
-        ) as out_after_tmp:
-            before_root = Path(before_tmp)
-            after_root = Path(after_tmp)
-            out_before = Path(out_before_tmp)
-            out_after = Path(out_after_tmp)
-            write_file_map(before_root, self.before_map)
-            write_file_map(after_root, self.after_map)
+        before_img = render_svg_to_image(before_svg) if before_svg is not None else None
+        after_img = render_svg_to_image(after_svg) if after_svg is not None else None
 
-            before_src = first_matching_file(before_root, suffix)
-            after_src = first_matching_file(after_root, suffix)
-            if before_src is None or after_src is None:
-                raise RuntimeError(self.image_not_available_text)
+        if before_img is None and after_img is None:
+            raise RuntimeError(self.image_not_available_text)
+        if before_img is None:
+            before_img = QImage(after_img.width(), after_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
+            before_img.fill(Qt.white)
+            self.image_status.setText(self.image_missing_side_text)
+            self.image_status.setStyleSheet("color: #9a6700;")
+        if after_img is None:
+            after_img = QImage(before_img.width(), before_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
+            after_img.fill(Qt.white)
+            self.image_status.setText(self.image_missing_side_text)
+            self.image_status.setStyleSheet("color: #9a6700;")
 
-            before_svg = export_svg_with_kicad_cli(self.cli_path, before_src, out_before, kind)
-            after_svg = export_svg_with_kicad_cli(self.cli_path, after_src, out_after, kind)
-
-            before_img = render_svg_to_image(before_svg)
-            after_img = render_svg_to_image(after_svg)
-            before_img, after_img = normalize_image_sizes(before_img, after_img)
-            diff_img = make_pixel_diff_image(before_img, after_img)
-            return before_img, after_img, diff_img
+        before_img, after_img = normalize_image_sizes(before_img, after_img)
+        diff_img = make_pixel_diff_image(before_img, after_img)
+        return before_img, after_img, diff_img
 
     def zoom_fit_images(self) -> None:
         self.image_zoom_mode = "fit"
@@ -1747,6 +1873,24 @@ class CompareResultDialog(QDialog):
             pixmap = pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         label.setPixmap(pixmap)
         label.resize(pixmap.size())
+
+    def _cleanup_temp_dirs(self) -> None:
+        for obj in [
+            self._tmp_before_dir_obj,
+            self._tmp_after_dir_obj,
+            self._tmp_svg_before_obj,
+            self._tmp_svg_after_obj,
+        ]:
+            if obj is not None:
+                obj.cleanup()
+        self._tmp_before_dir_obj = None
+        self._tmp_after_dir_obj = None
+        self._tmp_svg_before_obj = None
+        self._tmp_svg_after_obj = None
+
+    def closeEvent(self, event) -> None:
+        self._cleanup_temp_dirs()
+        super().closeEvent(event)
 
 
 class MainWindow(QMainWindow):
