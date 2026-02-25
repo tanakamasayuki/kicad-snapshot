@@ -11,11 +11,11 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from platformdirs import user_config_dir
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QImage, QPainter, QPixmap
+from PySide6.QtGui import QFont, QGuiApplication, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -93,6 +93,10 @@ TRANSLATIONS = {
         "group_next": "3) Next",
         "next_hint": "Continue is enabled only when CLI version is confirmed and a project is selected.",
         "continue": "Continue to Snapshot / Compare",
+        "snapshot_window_title": "Snapshots",
+        "snapshot_selected_project": "Project: {project}",
+        "snapshot_open_compare": "Open Compare Screen",
+        "snapshot_back": "Back",
         "footer": "Settings file: {path}",
         "dlg_select_cli": "Select kicad-cli",
         "dlg_open_project": "Open KiCad Project",
@@ -438,6 +442,14 @@ class SettingsStore:
         compare_timeline_limit = data.get("compare_timeline_limit")
         if isinstance(compare_timeline_limit, int):
             lines.append(f"compare_timeline_limit = {compare_timeline_limit}")
+
+        window_width = data.get("window_width")
+        if isinstance(window_width, int):
+            lines.append(f"window_width = {window_width}")
+
+        window_height = data.get("window_height")
+        if isinstance(window_height, int):
+            lines.append(f"window_height = {window_height}")
 
         last_project = data.get("last_project")
         if isinstance(last_project, str):
@@ -1429,6 +1441,278 @@ class EmptyCompareDialog(QDialog):
         root.addLayout(actions)
 
 
+class ItemDiffDialog(QDialog):
+    def __init__(
+        self,
+        title: str,
+        cli_path: Path,
+        before_map: dict[str, bytes],
+        after_map: dict[str, bytes],
+        t_func: Callable[[str], str],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setMinimumSize(1100, 680)
+
+        self.cli_path = cli_path
+        self.before_map = before_map
+        self.after_map = after_map
+        self.t = t_func
+        self.targets: list[dict[str, str | None]] = []
+        self._tmp_before_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+        self._tmp_after_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+        self._tmp_render_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+        self.before_root: Path | None = None
+        self.after_root: Path | None = None
+        self.render_root: Path | None = None
+        self.render_cache: dict[str, tuple[QImage, QImage, QImage]] = {}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        self.status = QLabel(self.t("compare_image_rendering"))
+        self.status.setStyleSheet("color: #666666;")
+        root.addWidget(self.status)
+
+        split = QSplitter(Qt.Horizontal)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        left_layout.addWidget(QLabel(self.t("compare_image_target")))
+        self.target_list = QListWidget()
+        self.target_list.currentRowChanged.connect(self.on_target_selected)
+        left_layout.addWidget(self.target_list, 1)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+
+        self.image_tabs = QTabWidget()
+        self.diff_label = QLabel()
+        self.before_label = QLabel()
+        self.after_label = QLabel()
+        for label in [self.diff_label, self.before_label, self.after_label]:
+            label.setAlignment(Qt.AlignCenter)
+            label.setText(self.t("compare_image_not_available"))
+        self.image_tabs.addTab(self._wrap_image_label(self.diff_label), self.t("compare_image_diff"))
+        self.image_tabs.addTab(self._wrap_image_label(self.before_label), self.t("compare_image_before"))
+        self.image_tabs.addTab(self._wrap_image_label(self.after_label), self.t("compare_image_after"))
+        right_layout.addWidget(self.image_tabs, 1)
+
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setStretchFactor(0, 2)
+        split.setStretchFactor(1, 5)
+        root.addWidget(split, 1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close_btn = QPushButton(self.t("compare_close"))
+        close_btn.clicked.connect(self.accept)
+        actions.addWidget(close_btn)
+        root.addLayout(actions)
+
+        QTimer.singleShot(0, self.load_targets)
+
+    def _wrap_image_label(self, label: QLabel) -> QWidget:
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        scroll.setWidget(label)
+        layout.addWidget(scroll, 1)
+        return wrap
+
+    def _target_key(self, target: dict[str, str | None]) -> str:
+        kind = target.get("kind") or ""
+        rel_path = target.get("path") or ""
+        layer = target.get("layer") or ""
+        return f"{kind}|{rel_path}|{layer}"
+
+    def load_targets(self) -> None:
+        self.target_list.clear()
+        self.targets.clear()
+        self.render_cache.clear()
+
+        self._cleanup_temp_dirs()
+        self._tmp_before_dir_obj = tempfile.TemporaryDirectory(prefix="ksnap_list_before_")
+        self._tmp_after_dir_obj = tempfile.TemporaryDirectory(prefix="ksnap_list_after_")
+        self._tmp_render_dir_obj = tempfile.TemporaryDirectory(prefix="ksnap_list_render_")
+        self.before_root = Path(self._tmp_before_dir_obj.name)
+        self.after_root = Path(self._tmp_after_dir_obj.name)
+        self.render_root = Path(self._tmp_render_dir_obj.name)
+        write_file_map(self.before_root, self.before_map)
+        write_file_map(self.after_root, self.after_map)
+
+        sch_paths = sorted(
+            {
+                p.relative_to(self.before_root).as_posix()
+                for p in self.before_root.rglob("*.kicad_sch")
+            }
+            | {
+                p.relative_to(self.after_root).as_posix()
+                for p in self.after_root.rglob("*.kicad_sch")
+            }
+        )
+        for rel_path in sch_paths:
+            self.targets.append({"kind": "sch", "path": rel_path, "layer": None})
+            self.target_list.addItem(f"SCH / {rel_path}")
+
+        pcb_paths = sorted(
+            {
+                p.relative_to(self.before_root).as_posix()
+                for p in self.before_root.rglob("*.kicad_pcb")
+            }
+            | {
+                p.relative_to(self.after_root).as_posix()
+                for p in self.after_root.rglob("*.kicad_pcb")
+            }
+        )
+        for rel_path in pcb_paths:
+            self.targets.append({"kind": "pcb", "path": rel_path, "layer": None})
+            self.target_list.addItem(f"PCB / {rel_path} / board")
+
+            layers: list[str] = []
+            before_pcb = self.before_root / rel_path
+            after_pcb = self.after_root / rel_path
+            if before_pcb.exists():
+                layers.extend(detect_pcb_layers(self.cli_path, before_pcb))
+            if after_pcb.exists():
+                layers.extend(detect_pcb_layers(self.cli_path, after_pcb))
+            unique_layers = list(dict.fromkeys(layers))
+            for layer in unique_layers:
+                self.targets.append({"kind": "pcb", "path": rel_path, "layer": layer})
+                self.target_list.addItem(f"PCB / {rel_path} / {layer}")
+
+        if self.target_list.count() == 0:
+            self.status.setText(self.t("compare_image_no_targets"))
+            self.status.setStyleSheet("color: #9a6700;")
+            return
+
+        self.status.setText(self.t("compare_image_status_ready"))
+        self.status.setStyleSheet("color: #2b7a0b;")
+        self.target_list.setCurrentRow(0)
+
+    def on_target_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self.targets):
+            return
+        target = self.targets[row]
+        key = self._target_key(target)
+        if key in self.render_cache:
+            before_img, after_img, diff_img = self.render_cache[key]
+            self._set_images(before_img, after_img, diff_img)
+            return
+
+        try:
+            before_img, after_img, diff_img = self._render_target(target)
+        except Exception as exc:
+            self.status.setText(str(exc))
+            self.status.setStyleSheet("color: #b00020;")
+            return
+        self.render_cache[key] = (before_img, after_img, diff_img)
+        self._set_images(before_img, after_img, diff_img)
+        self.status.setText(self.t("compare_image_status_ready"))
+        self.status.setStyleSheet("color: #2b7a0b;")
+
+    def _render_target(self, target: dict[str, str | None]) -> tuple[QImage, QImage, QImage]:
+        if self.before_root is None or self.after_root is None or self.render_root is None:
+            raise RuntimeError(self.t("compare_image_not_available"))
+
+        kind = target.get("kind")
+        rel_path = target.get("path")
+        layer = target.get("layer")
+        if not isinstance(kind, str) or not isinstance(rel_path, str):
+            raise RuntimeError(self.t("compare_image_not_available"))
+
+        before_source = self.before_root / rel_path
+        after_source = self.after_root / rel_path
+        base = self._safe_name(self._target_key(target))
+
+        before_svg = self._export_side_svg(
+            source=before_source if before_source.exists() else None,
+            out_dir=self.render_root / "before" / base,
+            kind=kind,
+            layer=layer,
+        )
+        after_svg = self._export_side_svg(
+            source=after_source if after_source.exists() else None,
+            out_dir=self.render_root / "after" / base,
+            kind=kind,
+            layer=layer,
+        )
+
+        if before_svg is None and after_svg is None:
+            raise RuntimeError(self.t("compare_image_not_available"))
+
+        before_img = render_svg_to_image(before_svg) if before_svg is not None else None
+        after_img = render_svg_to_image(after_svg) if after_svg is not None else None
+        if before_img is None and after_img is None:
+            raise RuntimeError(self.t("compare_image_not_available"))
+        if before_img is None:
+            before_img = QImage(after_img.width(), after_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
+            before_img.fill(Qt.white)
+        if after_img is None:
+            after_img = QImage(before_img.width(), before_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
+            after_img.fill(Qt.white)
+
+        before_img, after_img = normalize_image_sizes(before_img, after_img)
+        diff_img = make_pixel_diff_image(before_img, after_img)
+        return before_img, after_img, diff_img
+
+    def _export_side_svg(
+        self,
+        source: Path | None,
+        out_dir: Path,
+        kind: str,
+        layer: str | None,
+    ) -> Path | None:
+        if source is None:
+            return None
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if kind == "sch":
+            svgs = export_svg_bundle_with_kicad_cli(self.cli_path, source, out_dir, "sch")
+        elif kind == "pcb":
+            svgs = export_svg_bundle_with_kicad_cli(self.cli_path, source, out_dir, "pcb", pcb_layers=layer)
+        else:
+            return None
+        return svgs[0] if svgs else None
+
+    @staticmethod
+    def _safe_name(value: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", value)
+
+    def _set_images(self, before_img: QImage, after_img: QImage, diff_img: QImage) -> None:
+        self._set_image(self.diff_label, diff_img)
+        self._set_image(self.before_label, before_img)
+        self._set_image(self.after_label, after_img)
+        self.image_tabs.setCurrentIndex(0)
+
+    def _set_image(self, label: QLabel, image: QImage) -> None:
+        pixmap = QPixmap.fromImage(image)
+        label.setPixmap(pixmap)
+        label.resize(pixmap.size())
+
+    def _cleanup_temp_dirs(self) -> None:
+        for obj in [self._tmp_before_dir_obj, self._tmp_after_dir_obj, self._tmp_render_dir_obj]:
+            if obj is not None:
+                obj.cleanup()
+        self._tmp_before_dir_obj = None
+        self._tmp_after_dir_obj = None
+        self._tmp_render_dir_obj = None
+
+    def closeEvent(self, event) -> None:
+        self._cleanup_temp_dirs()
+        super().closeEvent(event)
+
+
 class CompareResultDialog(QDialog):
     def __init__(
         self,
@@ -2110,12 +2394,15 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.footer)
 
         self.startup_page = root
+        self.snapshot_page = self._build_snapshot_page()
         self.compare_page = self._build_compare_page()
         self.page_stack = QStackedWidget()
         self.page_stack.addWidget(self.startup_page)
+        self.page_stack.addWidget(self.snapshot_page)
         self.page_stack.addWidget(self.compare_page)
         self.page_stack.setCurrentWidget(self.startup_page)
         self.setCentralWidget(self.page_stack)
+        self.restore_window_size()
 
         self.load_recent_projects()
         self.apply_translations()
@@ -2127,14 +2414,137 @@ class MainWindow(QMainWindow):
         self.auto_detect_cli(initial=True)
         self.detect_git()
 
-    def _build_compare_page(self) -> QWidget:
+    def restore_window_size(self) -> None:
+        width = self.settings.get("window_width")
+        height = self.settings.get("window_height")
+        if not isinstance(width, int) or not isinstance(height, int):
+            return
+        if width < 1 or height < 1:
+            return
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            geom = screen.availableGeometry()
+            width = min(width, geom.width())
+            height = min(height, geom.height())
+        self.resize(width, height)
+
+    def closeEvent(self, event) -> None:
+        self.settings["window_width"] = self.width()
+        self.settings["window_height"] = self.height()
+        self.save_settings()
+        super().closeEvent(event)
+
+    def _build_snapshot_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
-        self.compare_timeline_list = None
-        self.compare_from_combo2 = None
-        self.compare_to_combo2 = None
+
+        self.snapshot_title = QLabel(self.t("snapshot_window_title"))
+        font = QFont()
+        font.setPointSize(18)
+        font.setBold(True)
+        self.snapshot_title.setFont(font)
+        layout.addWidget(self.snapshot_title)
+
+        self.snapshot_project_label = QLabel("")
+        self.snapshot_project_label.setStyleSheet("color: #666666;")
+        layout.addWidget(self.snapshot_project_label)
+
+        tools = QHBoxLayout()
+        self.snapshot_filter_label = QLabel(self.t("compare_filter"))
+        self.snapshot_filter_group = QButtonGroup(self)
+        self.snapshot_filter_both = QRadioButton(self.t("compare_filter_both"))
+        self.snapshot_filter_backup = QRadioButton(self.t("compare_filter_backup"))
+        self.snapshot_filter_git = QRadioButton(self.t("compare_filter_git"))
+        self.snapshot_filter_group.addButton(self.snapshot_filter_both)
+        self.snapshot_filter_group.addButton(self.snapshot_filter_backup)
+        self.snapshot_filter_group.addButton(self.snapshot_filter_git)
+        self.snapshot_filter_both.toggled.connect(self.on_snapshot_filter_changed)
+        self.snapshot_filter_backup.toggled.connect(self.on_snapshot_filter_changed)
+        self.snapshot_filter_git.toggled.connect(self.on_snapshot_filter_changed)
+
+        self.snapshot_limit_label = QLabel(self.t("compare_limit"))
+        self.snapshot_limit_combo = QComboBox()
+        for v in [20, 50, 100, 200, 500]:
+            self.snapshot_limit_combo.addItem(str(v), v)
+        limit = self.resolve_timeline_limit()
+        idx = self.snapshot_limit_combo.findData(limit)
+        if idx >= 0:
+            self.snapshot_limit_combo.setCurrentIndex(idx)
+        self.snapshot_limit_combo.currentIndexChanged.connect(self.on_snapshot_limit_changed)
+
+        self.snapshot_refresh_btn = QPushButton(self.t("compare_refresh"))
+        self.snapshot_refresh_btn.clicked.connect(self.refresh_snapshot_timeline)
+
+        self.snapshot_backup_memo_label = QLabel(self.t("compare_backup_memo"))
+        self.snapshot_backup_memo_input = QLineEdit()
+        self.snapshot_backup_memo_input.setPlaceholderText(self.t("compare_backup_memo_placeholder"))
+        self.snapshot_create_backup_btn = QPushButton(self.t("compare_create_backup"))
+        self.snapshot_create_backup_btn.clicked.connect(self.on_snapshot_create_backup)
+
+        tools.addWidget(self.snapshot_filter_label)
+        tools.addWidget(self.snapshot_filter_both)
+        tools.addWidget(self.snapshot_filter_backup)
+        tools.addWidget(self.snapshot_filter_git)
+        tools.addWidget(self.snapshot_limit_label)
+        tools.addWidget(self.snapshot_limit_combo)
+        tools.addWidget(self.snapshot_refresh_btn)
+        tools.addStretch(1)
+        tools.addWidget(self.snapshot_backup_memo_label)
+        tools.addWidget(self.snapshot_backup_memo_input)
+        tools.addWidget(self.snapshot_create_backup_btn)
+        layout.addLayout(tools)
+
+        self.snapshot_timeline_list = QListWidget()
+        self.snapshot_timeline_list.currentRowChanged.connect(self.on_snapshot_timeline_row_changed)
+        layout.addWidget(self.snapshot_timeline_list, 1)
+
+        compare_col = QVBoxLayout()
+        from_row = QHBoxLayout()
+        self.snapshot_from_label = QLabel(self.t("compare_from"))
+        self.snapshot_from_combo = QComboBox()
+        from_row.addWidget(self.snapshot_from_label)
+        from_row.addWidget(self.snapshot_from_combo, 1)
+
+        to_row = QHBoxLayout()
+        self.snapshot_to_label = QLabel(self.t("compare_to"))
+        self.snapshot_to_combo = QComboBox()
+        self.snapshot_to_combo.addItem(self.t("compare_current_project"), "__current_project__")
+        to_row.addWidget(self.snapshot_to_label)
+        to_row.addWidget(self.snapshot_to_combo, 1)
+
+        run_row = QHBoxLayout()
+        self.snapshot_compare_btn = QPushButton("")
+        self.snapshot_compare_btn.clicked.connect(self.open_compare_from_snapshot)
+        run_row.addStretch(1)
+        run_row.addWidget(self.snapshot_compare_btn)
+
+        compare_col.addLayout(from_row)
+        compare_col.addLayout(to_row)
+        compare_col.addLayout(run_row)
+        layout.addLayout(compare_col)
+
+        actions = QHBoxLayout()
+        self.snapshot_back_btn = QPushButton("")
+        self.snapshot_back_btn.clicked.connect(self.show_startup_page)
+        actions.addWidget(self.snapshot_back_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.snapshot_active_project: Path | None = None
+        self.snapshot_items_all: list[SnapshotItem] = []
+        self.snapshot_items_filtered: list[SnapshotItem] = []
+        self.snapshot_filter_group.blockSignals(True)
+        self.snapshot_filter_both.setChecked(True)
+        self.snapshot_filter_group.blockSignals(False)
+        return page
+
+    def _build_compare_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(10)
 
         self.compare_title = QLabel(self.t("compare_window_title"))
         font = QFont()
@@ -2143,99 +2553,208 @@ class MainWindow(QMainWindow):
         self.compare_title.setFont(font)
         layout.addWidget(self.compare_title)
 
-        tools = QHBoxLayout()
-        self.compare_source_label = QLabel(self.t("compare_filter"))
-        self.compare_source_group = QButtonGroup(self)
-        self.compare_source_both = QRadioButton(self.t("compare_filter_both"))
-        self.compare_source_backup = QRadioButton(self.t("compare_filter_backup"))
-        self.compare_source_git = QRadioButton(self.t("compare_filter_git"))
-        self.compare_source_group.addButton(self.compare_source_both)
-        self.compare_source_group.addButton(self.compare_source_backup)
-        self.compare_source_group.addButton(self.compare_source_git)
+        content_split = QSplitter(Qt.Horizontal)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        self.compare_items_label = QLabel(self.t("compare_image_target"))
+        left_layout.addWidget(self.compare_items_label)
+        self.compare_item_list = QListWidget()
+        self.compare_item_list.currentTextChanged.connect(self.on_compare_item_selected)
+        left_layout.addWidget(self.compare_item_list, 1)
+        self.compare_status_label = QLabel(self.t("compare_image_rendering"))
+        self.compare_status_label.setStyleSheet("color: #666666;")
+        left_layout.addWidget(self.compare_status_label)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        self.compare_preview_title = QLabel("Preview")
+        right_layout.addWidget(self.compare_preview_title)
+        self.compare_preview_body = QLabel(self.t("compare_image_not_available"))
+        self.compare_preview_body.setWordWrap(True)
+        self.compare_preview_body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.compare_preview_body.setStyleSheet("color: #666666;")
+        right_layout.addWidget(self.compare_preview_body, 1)
+
+        content_split.addWidget(left_panel)
+        content_split.addWidget(right_panel)
+        content_split.setStretchFactor(0, 1)
+        content_split.setStretchFactor(1, 5)
+        content_split.setSizes([260, 980])
+        layout.addWidget(content_split, 1)
+
         self.compare_active_project: Path | None = None
-        self.compare_items_all: list[SnapshotItem] = []
-        self.compare_items_filtered: list[SnapshotItem] = []
-        self.compare_source_both.toggled.connect(self.on_compare_filter_changed)
-        self.compare_source_backup.toggled.connect(self.on_compare_filter_changed)
-        self.compare_source_git.toggled.connect(self.on_compare_filter_changed)
-        self.compare_limit_label = QLabel(self.t("compare_limit"))
-        self.compare_limit_combo = QComboBox()
-        for v in [20, 50, 100, 200, 500]:
-            self.compare_limit_combo.addItem(str(v), v)
-        limit = self.resolve_timeline_limit()
-        idx = self.compare_limit_combo.findData(limit)
-        if idx >= 0:
-            self.compare_limit_combo.setCurrentIndex(idx)
-        self.compare_limit_combo.currentIndexChanged.connect(self.on_compare_limit_changed)
-        self.compare_refresh_btn = QPushButton(self.t("compare_refresh"))
-        self.compare_refresh_btn.clicked.connect(self.refresh_compare_timeline)
-        self.compare_backup_memo_label = QLabel(self.t("compare_backup_memo"))
-        self.compare_backup_memo_input = QLineEdit()
-        self.compare_backup_memo_input.setPlaceholderText(self.t("compare_backup_memo_placeholder"))
-        self.compare_create_backup_btn = QPushButton(self.t("compare_create_backup"))
-        self.compare_create_backup_btn.clicked.connect(self.on_compare_create_backup)
-        tools.addWidget(self.compare_source_label)
-        tools.addWidget(self.compare_source_both)
-        tools.addWidget(self.compare_source_backup)
-        tools.addWidget(self.compare_source_git)
-        tools.addWidget(self.compare_limit_label)
-        tools.addWidget(self.compare_limit_combo)
-        tools.addWidget(self.compare_refresh_btn)
-        tools.addStretch(1)
-        tools.addWidget(self.compare_backup_memo_label)
-        tools.addWidget(self.compare_backup_memo_input)
-        tools.addWidget(self.compare_create_backup_btn)
-        layout.addLayout(tools)
-
-        self.compare_timeline_list = QListWidget()
-        self.compare_timeline_list.currentRowChanged.connect(self.on_compare_timeline_row_changed)
-        layout.addWidget(self.compare_timeline_list, 1)
-
-        compare_col = QVBoxLayout()
-        from_row = QHBoxLayout()
-        self.compare_from_label2 = QLabel(self.t("compare_from"))
-        self.compare_from_combo2 = QComboBox()
-        from_row.addWidget(self.compare_from_label2)
-        from_row.addWidget(self.compare_from_combo2, 1)
-
-        to_row = QHBoxLayout()
-        self.compare_to_label2 = QLabel(self.t("compare_to"))
-        self.compare_to_combo2 = QComboBox()
-        self.compare_to_combo2.addItem(self.t("compare_current_project"), "__current_project__")
-        to_row.addWidget(self.compare_to_label2)
-        to_row.addWidget(self.compare_to_combo2, 1)
-
-        run_row = QHBoxLayout()
-        self.compare_run_btn2 = QPushButton(self.t("compare_run"))
-        self.compare_run_btn2.clicked.connect(self.run_compare)
-        run_row.addStretch(1)
-        run_row.addWidget(self.compare_run_btn2)
-
-        compare_col.addLayout(from_row)
-        compare_col.addLayout(to_row)
-        compare_col.addLayout(run_row)
-        layout.addLayout(compare_col)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
         self.compare_back_btn = QPushButton("")
-        self.compare_back_btn.clicked.connect(self.show_startup_page)
+        self.compare_back_btn.clicked.connect(self.show_snapshot_page_from_state)
         actions.addWidget(self.compare_back_btn)
         layout.addLayout(actions)
 
-        # Avoid firing filter handlers while page widgets are still wiring up.
-        self.compare_source_group.blockSignals(True)
-        self.compare_source_both.setChecked(True)
-        self.compare_source_group.blockSignals(False)
         return page
 
     def show_startup_page(self) -> None:
         self.page_stack.setCurrentWidget(self.startup_page)
 
+    def show_snapshot_page(self, project: str, output_dir: str) -> None:
+        del output_dir
+        self.snapshot_active_project = Path(project)
+        self.snapshot_project_label.setText(self.t("snapshot_selected_project", project=project))
+        mode = self.settings.get("compare_filter")
+        self.snapshot_filter_group.blockSignals(True)
+        if mode == "backup":
+            self.snapshot_filter_backup.setChecked(True)
+        elif mode == "git":
+            self.snapshot_filter_git.setChecked(True)
+        else:
+            self.snapshot_filter_both.setChecked(True)
+        self.snapshot_filter_group.blockSignals(False)
+        self.refresh_snapshot_timeline()
+        self.page_stack.setCurrentWidget(self.snapshot_page)
+
+    def show_snapshot_page_from_state(self) -> None:
+        if self.snapshot_active_project is None:
+            self.show_startup_page()
+            return
+        self.snapshot_project_label.setText(self.t("snapshot_selected_project", project=str(self.snapshot_active_project)))
+        self.refresh_snapshot_timeline()
+        self.page_stack.setCurrentWidget(self.snapshot_page)
+
+    def open_compare_from_snapshot(self) -> None:
+        if self.snapshot_active_project is None:
+            QMessageBox.warning(self, self.t("warning_project_title"), self.t("warning_project_text"))
+            return
+        if self.snapshot_from_combo.count() < 1 or self.snapshot_to_combo.count() < 1:
+            QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
+            return
+        from_id = self.snapshot_from_combo.currentData()
+        to_id = self.snapshot_to_combo.currentData()
+        if isinstance(from_id, str) and isinstance(to_id, str) and from_id == to_id:
+            QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_same"))
+            return
+        self.show_compare_page(str(self.snapshot_active_project), "")
+
+    def refresh_snapshot_timeline(self) -> None:
+        self.snapshot_timeline_list.clear()
+        self.snapshot_from_combo.clear()
+        self.snapshot_to_combo.clear()
+        self.snapshot_to_combo.addItem(self.t("compare_current_project"), "__current_project__")
+        if self.snapshot_active_project is None:
+            return
+        limit = self.resolve_timeline_limit()
+        backups = collect_backup_items(self.snapshot_active_project, limit)
+        commits = collect_git_items(self.snapshot_active_project, self.git_path, limit) if self.git_path else []
+        self.snapshot_items_all = sorted([*backups, *commits], key=lambda x: x.timestamp, reverse=True)[:limit]
+        self.apply_snapshot_filter()
+
+    def apply_snapshot_filter(self) -> None:
+        mode = "both"
+        if self.snapshot_filter_backup.isChecked():
+            mode = "backup"
+        elif self.snapshot_filter_git.isChecked():
+            mode = "git"
+        if mode == "backup":
+            self.snapshot_items_filtered = [x for x in self.snapshot_items_all if x.source == "backup"]
+        elif mode == "git":
+            self.snapshot_items_filtered = [x for x in self.snapshot_items_all if x.source == "git"]
+        else:
+            self.snapshot_items_filtered = list(self.snapshot_items_all)
+
+        self.snapshot_timeline_list.clear()
+        self.snapshot_from_combo.clear()
+        self.snapshot_to_combo.clear()
+        self.snapshot_to_combo.addItem(self.t("compare_current_project"), "__current_project__")
+        for item in self.snapshot_items_filtered:
+            self.snapshot_timeline_list.addItem(item.label)
+            self.snapshot_from_combo.addItem(item.label, item.identifier)
+            self.snapshot_to_combo.addItem(item.label, item.identifier)
+        self.snapshot_to_combo.setCurrentIndex(0)
+
+    def on_snapshot_filter_changed(self) -> None:
+        if self.snapshot_filter_backup.isChecked():
+            self.settings["compare_filter"] = "backup"
+        elif self.snapshot_filter_git.isChecked():
+            self.settings["compare_filter"] = "git"
+        else:
+            self.settings["compare_filter"] = "both"
+        self.save_settings()
+        self.apply_snapshot_filter()
+
+    def on_snapshot_limit_changed(self) -> None:
+        value = self.snapshot_limit_combo.currentData()
+        if not isinstance(value, int):
+            return
+        self.settings["compare_timeline_limit"] = value
+        self.save_settings()
+        self.refresh_snapshot_timeline()
+
+    def on_snapshot_timeline_row_changed(self, row: int) -> None:
+        if row < 0:
+            return
+        if row >= self.snapshot_from_combo.count():
+            return
+        self.snapshot_from_combo.setCurrentIndex(row)
+
+    def on_snapshot_create_backup(self) -> None:
+        if self.snapshot_active_project is None:
+            QMessageBox.warning(self, self.t("compare_backup_title"), self.t("warning_project_text"))
+            return
+        try:
+            create_project_backup(self.snapshot_active_project, memo=self.snapshot_backup_memo_input.text())
+        except Exception as exc:
+            QMessageBox.warning(self, self.t("compare_backup_title"), str(exc))
+            return
+        self.snapshot_backup_memo_input.clear()
+        self.refresh_snapshot_timeline()
+
     def show_compare_page(self, project: str, output_dir: str) -> None:
+        del output_dir
         self.compare_active_project = Path(project)
-        self.refresh_compare_timeline()
+        self.populate_compare_item_list()
         self.page_stack.setCurrentWidget(self.compare_page)
+
+    def populate_compare_item_list(self) -> None:
+        self.compare_item_list.clear()
+        self.compare_preview_body.setText(self.t("compare_image_not_available"))
+        if self.compare_active_project is None:
+            return
+
+        project_dir = self.compare_active_project.resolve().parent
+        sch_files = sorted(project_dir.rglob("*.kicad_sch"))
+        pcb_files = sorted(project_dir.rglob("*.kicad_pcb"))
+
+        for sch in sch_files:
+            rel = sch.relative_to(project_dir).as_posix()
+            self.compare_item_list.addItem(f"SCH / {rel}")
+
+        for pcb in pcb_files:
+            rel = pcb.relative_to(project_dir).as_posix()
+            self.compare_item_list.addItem(f"PCB / {rel} / board")
+            if self.cli_candidate is not None:
+                layers = detect_pcb_layers(self.cli_candidate.path, pcb)
+            else:
+                layers = parse_pcb_layers_from_file(pcb)
+            for layer in layers:
+                self.compare_item_list.addItem(f"PCB / {rel} / {layer}")
+
+        if self.compare_item_list.count() == 0:
+            self.compare_status_label.setText(self.t("compare_image_no_targets"))
+            self.compare_status_label.setStyleSheet("color: #9a6700;")
+        else:
+            self.compare_status_label.setText(self.t("compare_image_status_ready"))
+            self.compare_status_label.setStyleSheet("color: #2b7a0b;")
+            self.compare_item_list.setCurrentRow(0)
+
+    def on_compare_item_selected(self, text: str) -> None:
+        if not text:
+            self.compare_preview_body.setText(self.t("compare_image_not_available"))
+            return
+        self.compare_preview_body.setText(f"Selected:\n{text}")
 
     def refresh_compare_timeline(self) -> None:
         if self.compare_active_project is None:
@@ -2313,6 +2832,20 @@ class MainWindow(QMainWindow):
         self.compare_backup_memo_input.clear()
         self.refresh_compare_timeline()
 
+    def _load_compare_source_map(self, source_id: str) -> dict[str, bytes]:
+        if self.compare_active_project is None:
+            raise RuntimeError(self.t("warning_project_text"))
+        if source_id == "__current_project__":
+            return build_current_project_map(self.compare_active_project)
+        item = next((it for it in self.compare_items_filtered if it.identifier == source_id), None)
+        if item is None:
+            raise RuntimeError(f"Unknown source id: {source_id}")
+        if item.source == "backup":
+            return build_backup_zip_map(Path(item.identifier))
+        if item.source == "git":
+            return build_git_commit_map(self.compare_active_project, item.identifier, self.git_path)
+        raise RuntimeError(f"Unsupported source type: {item.source}")
+
     def resolve_timeline_limit(self) -> int:
         raw = self.settings.get("compare_timeline_limit")
         if isinstance(raw, int):
@@ -2358,6 +2891,38 @@ class MainWindow(QMainWindow):
         self.next_hint.setText(self.t("next_hint"))
         self.proceed_btn.setText(self.t("continue"))
         self.footer.setText(self.t("footer", path=str(self.settings_store.config_path)))
+        if hasattr(self, "snapshot_title"):
+            self.snapshot_title.setText(self.t("snapshot_window_title"))
+        if hasattr(self, "snapshot_project_label") and self.snapshot_active_project is not None:
+            self.snapshot_project_label.setText(
+                self.t("snapshot_selected_project", project=str(self.snapshot_active_project))
+            )
+        if hasattr(self, "snapshot_compare_btn"):
+            self.snapshot_compare_btn.setText(self.t("snapshot_open_compare"))
+        if hasattr(self, "snapshot_back_btn"):
+            self.snapshot_back_btn.setText(self.t("snapshot_back"))
+        if hasattr(self, "snapshot_filter_label"):
+            self.snapshot_filter_label.setText(self.t("compare_filter"))
+        if hasattr(self, "snapshot_filter_both"):
+            self.snapshot_filter_both.setText(self.t("compare_filter_both"))
+        if hasattr(self, "snapshot_filter_backup"):
+            self.snapshot_filter_backup.setText(self.t("compare_filter_backup"))
+        if hasattr(self, "snapshot_filter_git"):
+            self.snapshot_filter_git.setText(self.t("compare_filter_git"))
+        if hasattr(self, "snapshot_limit_label"):
+            self.snapshot_limit_label.setText(self.t("compare_limit"))
+        if hasattr(self, "snapshot_refresh_btn"):
+            self.snapshot_refresh_btn.setText(self.t("compare_refresh"))
+        if hasattr(self, "snapshot_backup_memo_label"):
+            self.snapshot_backup_memo_label.setText(self.t("compare_backup_memo"))
+        if hasattr(self, "snapshot_backup_memo_input"):
+            self.snapshot_backup_memo_input.setPlaceholderText(self.t("compare_backup_memo_placeholder"))
+        if hasattr(self, "snapshot_create_backup_btn"):
+            self.snapshot_create_backup_btn.setText(self.t("compare_create_backup"))
+        if hasattr(self, "snapshot_from_label"):
+            self.snapshot_from_label.setText(self.t("compare_from"))
+        if hasattr(self, "snapshot_to_label"):
+            self.snapshot_to_label.setText(self.t("compare_to"))
         if hasattr(self, "compare_title"):
             self.compare_title.setText(self.t("compare_window_title"))
         if hasattr(self, "compare_source_label"):
@@ -2424,7 +2989,15 @@ class MainWindow(QMainWindow):
         for i in range(self.recent_list.count()):
             recent.append(self.recent_list.item(i).text())
 
-        self.settings["recent_projects"] = recent[:MAX_RECENT]
+        if recent:
+            self.settings["recent_projects"] = recent[:MAX_RECENT]
+        else:
+            # Avoid accidentally wiping history when UI state is temporarily empty.
+            existing = self.settings.get("recent_projects", [])
+            if not isinstance(existing, list):
+                self.settings["recent_projects"] = []
+            else:
+                self.settings["recent_projects"] = [str(x) for x in existing[:MAX_RECENT]]
         selected = self.selected_project()
         if selected:
             self.settings["last_project"] = selected
@@ -2604,12 +3177,33 @@ class MainWindow(QMainWindow):
         if self.compare_from_combo2.count() < 1 or self.compare_to_combo2.count() < 1:
             QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
             return
+        if self.cli_candidate is None:
+            QMessageBox.warning(self, self.t("warning_cli_title"), self.t("warning_cli_text"))
+            return
         from_id = self.compare_from_combo2.currentData()
         to_id = self.compare_to_combo2.currentData()
         if isinstance(from_id, str) and isinstance(to_id, str) and from_id == to_id:
             QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_same"))
             return
-        QMessageBox.information(self, self.t("compare_started_title"), self.t("compare_started_text", from_item=str(self.compare_from_combo2.currentText()), to_item=str(self.compare_to_combo2.currentText())))
+        if not isinstance(from_id, str) or not isinstance(to_id, str):
+            QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
+            return
+        try:
+            before_map = self._load_compare_source_map(from_id)
+            after_map = self._load_compare_source_map(to_id)
+        except Exception as exc:
+            QMessageBox.warning(self, self.t("compare_started_title"), str(exc))
+            return
+
+        dialog = ItemDiffDialog(
+            title=self.t("compare_started_title"),
+            cli_path=self.cli_candidate.path,
+            before_map=before_map,
+            after_map=after_map,
+            t_func=lambda key: self.t(key),
+            parent=self,
+        )
+        dialog.exec()
 
     def on_continue(self) -> None:
         if not self.cli_candidate:
@@ -2633,7 +3227,7 @@ class MainWindow(QMainWindow):
         self.settings["output_dir"] = default_output
         self.save_settings()
 
-        self.show_compare_page(project=project, output_dir=default_output)
+        self.show_snapshot_page(project=project, output_dir=default_output)
 
 
 def main() -> None:
