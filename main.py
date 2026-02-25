@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 from platformdirs import user_config_dir
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -37,9 +37,11 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QScrollArea,
     QSpacerItem,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -133,6 +135,7 @@ TRANSLATIONS = {
         "compare_result_no_diff": "No changed files.",
         "compare_result_error": "Failed to compare: {error}",
         "compare_close": "Close",
+        "compare_back": "Back",
         "compare_visual_title": "Visual Diff",
         "compare_visual_file": "File",
         "compare_visual_before": "Before",
@@ -231,6 +234,7 @@ TRANSLATIONS = {
         "compare_result_no_diff": "差分ファイルはありません。",
         "compare_result_error": "比較に失敗しました: {error}",
         "compare_close": "閉じる",
+        "compare_back": "戻る",
         "compare_visual_title": "ビジュアル差分",
         "compare_visual_file": "ファイル",
         "compare_visual_before": "Before",
@@ -734,37 +738,41 @@ def first_matching_file(root: Path, suffix: str) -> Path | None:
     return matches[0]
 
 
-def export_svg_bundle_with_kicad_cli(cli_path: Path, source_file: Path, out_dir: Path, kind: str) -> list[Path]:
+def export_svg_bundle_with_kicad_cli(
+    cli_path: Path,
+    source_file: Path,
+    out_dir: Path,
+    kind: str,
+    pcb_layers: str | None = None,
+) -> list[Path]:
     if kind == "sch":
         commands = [
             [str(cli_path), "sch", "export", "svg", str(source_file), "-o", str(out_dir)],
         ]
     elif kind == "pcb":
         # Try broad layer sets first to get a board-wide render on varying KiCad versions.
+        layer_sets = [pcb_layers] if pcb_layers else [
+            "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts",
+            "F.Cu,B.Cu",
+            None,
+        ]
         commands = [
-            [
-                str(cli_path),
-                "pcb",
-                "export",
-                "svg",
-                "--layers",
-                "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts",
-                str(source_file),
-                "-o",
-                str(out_dir),
-            ],
-            [
-                str(cli_path),
-                "pcb",
-                "export",
-                "svg",
-                "--layers",
-                "F.Cu,B.Cu",
-                str(source_file),
-                "-o",
-                str(out_dir),
-            ],
-            [str(cli_path), "pcb", "export", "svg", str(source_file), "-o", str(out_dir)],
+            (
+                [
+                    str(cli_path),
+                    "pcb",
+                    "export",
+                    "svg",
+                    "--layers",
+                    layers,
+                    str(source_file),
+                    "-o",
+                    str(out_dir),
+                ]
+                if layers is not None
+                else [str(cli_path), "pcb", "export", "svg", str(source_file), "-o", str(out_dir)]
+            )
+            for layers in layer_sets
         ]
     else:
         raise RuntimeError(f"Unsupported kind: {kind}")
@@ -835,6 +843,45 @@ def normalize_image_sizes(before: QImage, after: QImage) -> tuple[QImage, QImage
     width = max(before.width(), after.width())
     height = max(before.height(), after.height())
     return pad_image(before, width, height), pad_image(after, width, height)
+
+
+def parse_pcb_layers_from_file(pcb_path: Path) -> list[str]:
+    try:
+        text = pcb_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    # KiCad PCB format contains lines like: (0 "F.Cu" signal)
+    names = re.findall(r'\(\s*\d+\s+"([^"]+)"\s+', text)
+    unique: list[str] = []
+    seen = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        unique.append(name)
+    return unique
+
+
+def detect_pcb_layers(cli_path: Path, pcb_path: Path) -> list[str]:
+    candidates = [
+        [str(cli_path), "pcb", "layers", "list", str(pcb_path)],
+        [str(cli_path), "pcb", "list-layers", str(pcb_path)],
+    ]
+    for cmd in candidates:
+        try:
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=10)
+        except Exception:
+            continue
+        if result.returncode != 0:
+            continue
+        layers: list[str] = []
+        for line in (result.stdout or "").splitlines():
+            token = line.strip().split()[0] if line.strip() else ""
+            if token and "." in token:
+                layers.append(token)
+        if layers:
+            return list(dict.fromkeys(layers))
+    return parse_pcb_layers_from_file(pcb_path)
 
 
 def sanitize_memo_for_filename(memo: str) -> str:
@@ -1154,6 +1201,10 @@ class SnapshotCompareDialog(QDialog):
         self.git_commit_btn.setText(self.t("compare_git_commit"))
         self.git_push_btn.setText(self.t("compare_git_push"))
         self.git_pull_btn.setText(self.t("compare_git_pull"))
+        if hasattr(self, "compare_back_btn"):
+            self.compare_back_btn.setText(self.t("compare_back"))
+        if hasattr(self, "compare_close_btn"):
+            self.compare_close_btn.setText(self.t("compare_close"))
 
     def refresh_data(self) -> None:
         self.backup_items = collect_backup_items(self.project_file, self.timeline_limit)
@@ -1260,18 +1311,13 @@ class SnapshotCompareDialog(QDialog):
 
     def create_backup(self) -> None:
         try:
-            zip_path = create_project_backup(
+            create_project_backup(
                 self.project_file,
                 memo=self.backup_memo_input.text(),
             )
         except Exception as exc:
             QMessageBox.warning(self, self.t("compare_git_fail_title"), str(exc))
             return
-        QMessageBox.information(
-            self,
-            self.t("compare_backup_title"),
-            self.t("compare_backup_created", path=str(zip_path)),
-        )
         self.backup_memo_input.clear()
         self.refresh_data()
 
@@ -1295,54 +1341,9 @@ class SnapshotCompareDialog(QDialog):
             QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
             return
 
-        try:
-            before_map = self._load_source_map(from_id)
-            after_map = self._load_source_map(to_id)
-        except Exception as exc:
-            QMessageBox.warning(
-                self,
-                self.t("compare_result_title"),
-                self.t("compare_result_error", error=str(exc)),
-            )
-            return
-
-        added, removed, changed, unchanged = compare_file_maps(before_map, after_map)
-        dialog = CompareResultDialog(
+        dialog = EmptyCompareDialog(
             title=self.t("compare_result_title"),
-            summary=self.t(
-                "compare_result_summary",
-                added=str(len(added)),
-                removed=str(len(removed)),
-                changed=str(len(changed)),
-                unchanged=str(len(unchanged)),
-            ),
-            files_title=self.t("compare_result_files"),
-            no_diff_text=self.t("compare_result_no_diff"),
             close_text=self.t("compare_close"),
-            visual_title=self.t("compare_visual_title"),
-            visual_file_label=self.t("compare_visual_file"),
-            visual_before_label=self.t("compare_visual_before"),
-            visual_after_label=self.t("compare_visual_after"),
-            visual_empty_text=self.t("compare_visual_empty"),
-            image_title=self.t("compare_image_title"),
-            image_target_text=self.t("compare_image_target"),
-            image_render_text=self.t("compare_image_render"),
-            image_status_text=self.t("compare_image_status"),
-            image_no_targets_text=self.t("compare_image_no_targets"),
-            image_missing_side_text=self.t("compare_image_missing_side"),
-            image_before_text=self.t("compare_image_before"),
-            image_after_text=self.t("compare_image_after"),
-            image_diff_text=self.t("compare_image_diff"),
-            image_not_available_text=self.t("compare_image_not_available"),
-            image_zoom_out_text=self.t("compare_image_zoom_out"),
-            image_zoom_in_text=self.t("compare_image_zoom_in"),
-            image_zoom_fit_text=self.t("compare_image_zoom_fit"),
-            added=added,
-            removed=removed,
-            changed=changed,
-            before_map=before_map,
-            after_map=after_map,
-            cli_path=self.cli_path,
             parent=self,
         )
         dialog.exec()
@@ -1404,6 +1405,30 @@ class SnapshotCompareDialog(QDialog):
         self.refresh_data()
 
 
+class EmptyCompareDialog(QDialog):
+    def __init__(self, title: str, close_text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowTitle(title)
+        self.setMinimumSize(900, 560)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        placeholder = QWidget()
+        placeholder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        root.addWidget(placeholder, 1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close_btn = QPushButton(close_text)
+        close_btn.clicked.connect(self.accept)
+        actions.addWidget(close_btn)
+        root.addLayout(actions)
+
+
 class CompareResultDialog(QDialog):
     def __init__(
         self,
@@ -1463,6 +1488,8 @@ class CompareResultDialog(QDialog):
         self._tmp_after_dir_obj: tempfile.TemporaryDirectory[str] | None = None
         self._tmp_svg_before_obj: tempfile.TemporaryDirectory[str] | None = None
         self._tmp_svg_after_obj: tempfile.TemporaryDirectory[str] | None = None
+        self.before_root: Path | None = None
+        self.after_root: Path | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
@@ -1544,18 +1571,13 @@ class CompareResultDialog(QDialog):
         image_layout.setSpacing(8)
         image_button_row = QHBoxLayout()
         self.image_target_label = QLabel(image_target_text)
-        self.image_target_combo = QComboBox()
-        self.image_render_btn = QPushButton(image_render_text)
         self.image_zoom_out_btn = QPushButton(image_zoom_out_text)
         self.image_zoom_in_btn = QPushButton(image_zoom_in_text)
         self.image_zoom_fit_btn = QPushButton(image_zoom_fit_text)
-        self.image_render_btn.clicked.connect(self.generate_image_diff_for_selected_target)
         self.image_zoom_out_btn.clicked.connect(self.zoom_out_images)
         self.image_zoom_in_btn.clicked.connect(self.zoom_in_images)
         self.image_zoom_fit_btn.clicked.connect(self.zoom_fit_images)
         image_button_row.addWidget(self.image_target_label)
-        image_button_row.addWidget(self.image_target_combo, 1)
-        image_button_row.addWidget(self.image_render_btn)
         image_button_row.addWidget(self.image_zoom_out_btn)
         image_button_row.addWidget(self.image_zoom_in_btn)
         image_button_row.addWidget(self.image_zoom_fit_btn)
@@ -1566,6 +1588,10 @@ class CompareResultDialog(QDialog):
         self.image_status.setWordWrap(True)
         self.image_status.setStyleSheet("color: #666666;")
         image_layout.addWidget(self.image_status)
+
+        self.image_target_list = QListWidget()
+        self.image_target_list.currentRowChanged.connect(self.on_image_target_selected)
+        image_layout.addWidget(self.image_target_list, 1)
 
         self.before_image_label = QLabel()
         self.after_image_label = QLabel()
@@ -1603,7 +1629,9 @@ class CompareResultDialog(QDialog):
         else:
             self.before_text.setPlainText(self.visual_empty_text)
             self.after_text.setPlainText(self.visual_empty_text)
-        self.prepare_image_targets()
+        self.image_status.setText(image_status_text)
+        self.image_status.setStyleSheet("color: #666666;")
+        QTimer.singleShot(0, self.prepare_image_targets)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -1685,7 +1713,7 @@ class CompareResultDialog(QDialog):
             return data.decode("utf-8", errors="replace")
 
     def prepare_image_targets(self) -> None:
-        self.image_target_combo.clear()
+        self.image_target_list.clear()
         self.image_targets.clear()
         self.before_svg_map.clear()
         self.after_svg_map.clear()
@@ -1701,12 +1729,25 @@ class CompareResultDialog(QDialog):
             after_root = Path(self._tmp_after_dir_obj.name)
             out_before = Path(self._tmp_svg_before_obj.name)
             out_after = Path(self._tmp_svg_after_obj.name)
+            self.before_root = before_root
+            self.after_root = after_root
 
             write_file_map(before_root, self.before_map)
             write_file_map(after_root, self.after_map)
 
-            self.before_svg_map.update(self._export_side_svgs(before_root, out_before))
-            self.after_svg_map.update(self._export_side_svgs(after_root, out_after))
+            self.before_svg_map.update(self._export_side_svgs(before_root, out_before, []))
+            self.after_svg_map.update(self._export_side_svgs(after_root, out_after, []))
+
+            before_pcb = first_matching_file(before_root, ".kicad_pcb")
+            after_pcb = first_matching_file(after_root, ".kicad_pcb")
+            layers: list[str] = []
+            if before_pcb is not None:
+                layers.extend(detect_pcb_layers(self.cli_path, before_pcb))
+            if after_pcb is not None:
+                layers.extend(detect_pcb_layers(self.cli_path, after_pcb))
+            layers = list(dict.fromkeys(layers))
+            self.before_svg_map.update(self._export_side_svgs(before_root, out_before, layers))
+            self.after_svg_map.update(self._export_side_svgs(after_root, out_after, layers))
 
             all_keys = sorted(set(self.before_svg_map.keys()) | set(self.after_svg_map.keys()))
             for key in all_keys:
@@ -1717,19 +1758,21 @@ class CompareResultDialog(QDialog):
                     prefix = "SCH" if kind == "sch" else "PCB"
                     label = f"{prefix} / {rel}"
                 self.image_targets.append((key, label))
-                self.image_target_combo.addItem(label, key)
+                status = "Diff" if self._target_has_diff(key) else "Same"
+                self.image_target_list.addItem(f"{label}  [{status}]")
 
-            if self.image_target_combo.count() == 0:
+            if self.image_target_list.count() == 0:
                 self.image_status.setText(self.image_no_targets_text)
                 self.image_status.setStyleSheet("color: #9a6700;")
             else:
                 self.image_status.setText(self.image_status_default_text)
                 self.image_status.setStyleSheet("color: #666666;")
+                self.image_target_list.setCurrentRow(0)
         except Exception as exc:
             self.image_status.setText(str(exc))
             self.image_status.setStyleSheet("color: #b00020;")
 
-    def _export_side_svgs(self, source_root: Path, out_root: Path) -> dict[str, Path]:
+    def _export_side_svgs(self, source_root: Path, out_root: Path, layers: list[str]) -> dict[str, Path]:
         result: dict[str, Path] = {}
         sch_src = first_matching_file(source_root, ".kicad_sch")
         if sch_src is not None:
@@ -1758,14 +1801,29 @@ class CompareResultDialog(QDialog):
             except Exception:
                 # Keep other targets available even if PCB export fails.
                 pass
+
+            # Layer-specific exports
+            for layer in layers:
+                layer_dir = pcb_out / f"layer_{layer.replace('.', '_')}"
+                layer_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    layer_svgs = export_svg_bundle_with_kicad_cli(
+                        self.cli_path,
+                        pcb_src,
+                        layer_dir,
+                        "pcb",
+                        pcb_layers=layer,
+                    )
+                    if layer_svgs:
+                        result[f"pcb|layer:{layer}"] = layer_svgs[0]
+                except Exception:
+                    continue
         return result
 
-    def generate_image_diff_for_selected_target(self) -> None:
-        key = self.image_target_combo.currentData()
-        if not isinstance(key, str):
-            self.image_status.setText(self.image_no_targets_text)
-            self.image_status.setStyleSheet("color: #9a6700;")
+    def on_image_target_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self.image_targets):
             return
+        key = self.image_targets[row][0]
         try:
             before_img, after_img, diff_img = self._build_image_diff_for_target(key)
         except Exception as exc:
@@ -1780,6 +1838,16 @@ class CompareResultDialog(QDialog):
         self.diff_image_raw = diff_img
         self.image_zoom_scale = 1.0
         self.zoom_fit_images()
+
+    def _target_has_diff(self, key: str) -> bool:
+        before_svg = self.before_svg_map.get(key)
+        after_svg = self.after_svg_map.get(key)
+        if before_svg is None or after_svg is None:
+            return True
+        try:
+            return before_svg.read_bytes() != after_svg.read_bytes()
+        except OSError:
+            return True
 
     def _build_image_diff_for_target(self, target_key: str) -> tuple[QImage, QImage, QImage]:
         before_svg = self.before_svg_map.get(target_key)
@@ -2041,7 +2109,13 @@ class MainWindow(QMainWindow):
         self.footer.setAlignment(Qt.AlignRight)
         root_layout.addWidget(self.footer)
 
-        self.setCentralWidget(root)
+        self.startup_page = root
+        self.compare_page = self._build_compare_page()
+        self.page_stack = QStackedWidget()
+        self.page_stack.addWidget(self.startup_page)
+        self.page_stack.addWidget(self.compare_page)
+        self.page_stack.setCurrentWidget(self.startup_page)
+        self.setCentralWidget(self.page_stack)
 
         self.load_recent_projects()
         self.apply_translations()
@@ -2052,6 +2126,204 @@ class MainWindow(QMainWindow):
 
         self.auto_detect_cli(initial=True)
         self.detect_git()
+
+    def _build_compare_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+        self.compare_timeline_list = None
+        self.compare_from_combo2 = None
+        self.compare_to_combo2 = None
+
+        self.compare_title = QLabel(self.t("compare_window_title"))
+        font = QFont()
+        font.setPointSize(18)
+        font.setBold(True)
+        self.compare_title.setFont(font)
+        layout.addWidget(self.compare_title)
+
+        tools = QHBoxLayout()
+        self.compare_source_label = QLabel(self.t("compare_filter"))
+        self.compare_source_group = QButtonGroup(self)
+        self.compare_source_both = QRadioButton(self.t("compare_filter_both"))
+        self.compare_source_backup = QRadioButton(self.t("compare_filter_backup"))
+        self.compare_source_git = QRadioButton(self.t("compare_filter_git"))
+        self.compare_source_group.addButton(self.compare_source_both)
+        self.compare_source_group.addButton(self.compare_source_backup)
+        self.compare_source_group.addButton(self.compare_source_git)
+        self.compare_active_project: Path | None = None
+        self.compare_items_all: list[SnapshotItem] = []
+        self.compare_items_filtered: list[SnapshotItem] = []
+        self.compare_source_both.toggled.connect(self.on_compare_filter_changed)
+        self.compare_source_backup.toggled.connect(self.on_compare_filter_changed)
+        self.compare_source_git.toggled.connect(self.on_compare_filter_changed)
+        self.compare_limit_label = QLabel(self.t("compare_limit"))
+        self.compare_limit_combo = QComboBox()
+        for v in [20, 50, 100, 200, 500]:
+            self.compare_limit_combo.addItem(str(v), v)
+        limit = self.resolve_timeline_limit()
+        idx = self.compare_limit_combo.findData(limit)
+        if idx >= 0:
+            self.compare_limit_combo.setCurrentIndex(idx)
+        self.compare_limit_combo.currentIndexChanged.connect(self.on_compare_limit_changed)
+        self.compare_refresh_btn = QPushButton(self.t("compare_refresh"))
+        self.compare_refresh_btn.clicked.connect(self.refresh_compare_timeline)
+        self.compare_backup_memo_label = QLabel(self.t("compare_backup_memo"))
+        self.compare_backup_memo_input = QLineEdit()
+        self.compare_backup_memo_input.setPlaceholderText(self.t("compare_backup_memo_placeholder"))
+        self.compare_create_backup_btn = QPushButton(self.t("compare_create_backup"))
+        self.compare_create_backup_btn.clicked.connect(self.on_compare_create_backup)
+        tools.addWidget(self.compare_source_label)
+        tools.addWidget(self.compare_source_both)
+        tools.addWidget(self.compare_source_backup)
+        tools.addWidget(self.compare_source_git)
+        tools.addWidget(self.compare_limit_label)
+        tools.addWidget(self.compare_limit_combo)
+        tools.addWidget(self.compare_refresh_btn)
+        tools.addStretch(1)
+        tools.addWidget(self.compare_backup_memo_label)
+        tools.addWidget(self.compare_backup_memo_input)
+        tools.addWidget(self.compare_create_backup_btn)
+        layout.addLayout(tools)
+
+        self.compare_timeline_list = QListWidget()
+        self.compare_timeline_list.currentRowChanged.connect(self.on_compare_timeline_row_changed)
+        layout.addWidget(self.compare_timeline_list, 1)
+
+        compare_col = QVBoxLayout()
+        from_row = QHBoxLayout()
+        self.compare_from_label2 = QLabel(self.t("compare_from"))
+        self.compare_from_combo2 = QComboBox()
+        from_row.addWidget(self.compare_from_label2)
+        from_row.addWidget(self.compare_from_combo2, 1)
+
+        to_row = QHBoxLayout()
+        self.compare_to_label2 = QLabel(self.t("compare_to"))
+        self.compare_to_combo2 = QComboBox()
+        self.compare_to_combo2.addItem(self.t("compare_current_project"), "__current_project__")
+        to_row.addWidget(self.compare_to_label2)
+        to_row.addWidget(self.compare_to_combo2, 1)
+
+        run_row = QHBoxLayout()
+        self.compare_run_btn2 = QPushButton(self.t("compare_run"))
+        self.compare_run_btn2.clicked.connect(self.run_compare)
+        run_row.addStretch(1)
+        run_row.addWidget(self.compare_run_btn2)
+
+        compare_col.addLayout(from_row)
+        compare_col.addLayout(to_row)
+        compare_col.addLayout(run_row)
+        layout.addLayout(compare_col)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.compare_back_btn = QPushButton("")
+        self.compare_back_btn.clicked.connect(self.show_startup_page)
+        actions.addWidget(self.compare_back_btn)
+        layout.addLayout(actions)
+
+        # Avoid firing filter handlers while page widgets are still wiring up.
+        self.compare_source_group.blockSignals(True)
+        self.compare_source_both.setChecked(True)
+        self.compare_source_group.blockSignals(False)
+        return page
+
+    def show_startup_page(self) -> None:
+        self.page_stack.setCurrentWidget(self.startup_page)
+
+    def show_compare_page(self, project: str, output_dir: str) -> None:
+        self.compare_active_project = Path(project)
+        self.refresh_compare_timeline()
+        self.page_stack.setCurrentWidget(self.compare_page)
+
+    def refresh_compare_timeline(self) -> None:
+        if self.compare_active_project is None:
+            self.compare_timeline_list.clear()
+            return
+        backups = collect_backup_items(self.compare_active_project, self.resolve_timeline_limit())
+        commits = collect_git_items(self.compare_active_project, self.git_path, self.resolve_timeline_limit()) if self.git_path else []
+        self.compare_items_all = sorted([*backups, *commits], key=lambda x: x.timestamp, reverse=True)[: self.resolve_timeline_limit()]
+        self.apply_compare_filter()
+
+    def apply_compare_filter(self) -> None:
+        if not hasattr(self, "compare_items_all"):
+            return
+        if not hasattr(self, "compare_timeline_list"):
+            return
+        if self.compare_timeline_list is None:
+            return
+        if not hasattr(self, "compare_from_combo2") or self.compare_from_combo2 is None:
+            return
+        if not hasattr(self, "compare_to_combo2") or self.compare_to_combo2 is None:
+            return
+        if self.compare_source_backup.isChecked():
+            mode = "backup"
+        elif self.compare_source_git.isChecked():
+            mode = "git"
+        else:
+            mode = "both"
+        if mode == "backup":
+            self.compare_items_filtered = [x for x in self.compare_items_all if x.source == "backup"]
+        elif mode == "git":
+            self.compare_items_filtered = [x for x in self.compare_items_all if x.source == "git"]
+        else:
+            self.compare_items_filtered = list(self.compare_items_all)
+
+        self.compare_timeline_list.clear()
+        self.compare_from_combo2.clear()
+        self.compare_to_combo2.clear()
+        self.compare_to_combo2.addItem(self.t("compare_current_project"), "__current_project__")
+        for item in self.compare_items_filtered:
+            self.compare_timeline_list.addItem(item.label)
+            self.compare_from_combo2.addItem(item.label, item.identifier)
+            self.compare_to_combo2.addItem(item.label, item.identifier)
+        self.compare_to_combo2.setCurrentIndex(0)
+
+    def on_compare_filter_changed(self) -> None:
+        self.apply_compare_filter()
+
+    def on_compare_limit_changed(self) -> None:
+        value = self.compare_limit_combo.currentData()
+        if not isinstance(value, int):
+            return
+        self.settings["compare_timeline_limit"] = value
+        self.save_settings()
+        self.refresh_compare_timeline()
+
+    def on_compare_timeline_row_changed(self, row: int) -> None:
+        if row < 0:
+            return
+        if row >= self.compare_from_combo2.count():
+            return
+        self.compare_from_combo2.setCurrentIndex(row)
+
+    def on_compare_create_backup(self) -> None:
+        if self.compare_active_project is None:
+            QMessageBox.warning(self, self.t("compare_backup_title"), self.t("warning_project_text"))
+            return
+        try:
+            create_project_backup(
+                self.compare_active_project,
+                memo=self.compare_backup_memo_input.text(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, self.t("compare_backup_title"), str(exc))
+            return
+        self.compare_backup_memo_input.clear()
+        self.refresh_compare_timeline()
+
+    def resolve_timeline_limit(self) -> int:
+        raw = self.settings.get("compare_timeline_limit")
+        if isinstance(raw, int):
+            value = raw
+        else:
+            value = DEFAULT_TIMELINE_LIMIT
+        if value < 1:
+            return DEFAULT_TIMELINE_LIMIT
+        if value > 500:
+            return 500
+        return value
 
     def t(self, key: str, **kwargs: str) -> str:
         table = TRANSLATIONS.get(self.language, TRANSLATIONS["en"])
@@ -2086,6 +2358,34 @@ class MainWindow(QMainWindow):
         self.next_hint.setText(self.t("next_hint"))
         self.proceed_btn.setText(self.t("continue"))
         self.footer.setText(self.t("footer", path=str(self.settings_store.config_path)))
+        if hasattr(self, "compare_title"):
+            self.compare_title.setText(self.t("compare_window_title"))
+        if hasattr(self, "compare_source_label"):
+            self.compare_source_label.setText(self.t("compare_filter"))
+        if hasattr(self, "compare_source_both"):
+            self.compare_source_both.setText(self.t("compare_filter_both"))
+        if hasattr(self, "compare_source_backup"):
+            self.compare_source_backup.setText(self.t("compare_filter_backup"))
+        if hasattr(self, "compare_source_git"):
+            self.compare_source_git.setText(self.t("compare_filter_git"))
+        if hasattr(self, "compare_limit_label"):
+            self.compare_limit_label.setText(self.t("compare_limit"))
+        if hasattr(self, "compare_refresh_btn"):
+            self.compare_refresh_btn.setText(self.t("compare_refresh"))
+        if hasattr(self, "compare_backup_memo_label"):
+            self.compare_backup_memo_label.setText(self.t("compare_backup_memo"))
+        if hasattr(self, "compare_backup_memo_input"):
+            self.compare_backup_memo_input.setPlaceholderText(self.t("compare_backup_memo_placeholder"))
+        if hasattr(self, "compare_create_backup_btn"):
+            self.compare_create_backup_btn.setText(self.t("compare_create_backup"))
+        if hasattr(self, "compare_from_label2"):
+            self.compare_from_label2.setText(self.t("compare_from"))
+        if hasattr(self, "compare_to_label2"):
+            self.compare_to_label2.setText(self.t("compare_to"))
+        if hasattr(self, "compare_run_btn2"):
+            self.compare_run_btn2.setText(self.t("compare_run"))
+        if hasattr(self, "compare_back_btn"):
+            self.compare_back_btn.setText(self.t("compare_back"))
         self.render_cli_status()
         self.render_git_status()
 
@@ -2300,6 +2600,17 @@ class MainWindow(QMainWindow):
     def on_project_chosen(self) -> None:
         self.update_next_state()
 
+    def run_compare(self) -> None:
+        if self.compare_from_combo2.count() < 1 or self.compare_to_combo2.count() < 1:
+            QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
+            return
+        from_id = self.compare_from_combo2.currentData()
+        to_id = self.compare_to_combo2.currentData()
+        if isinstance(from_id, str) and isinstance(to_id, str) and from_id == to_id:
+            QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_same"))
+            return
+        QMessageBox.information(self, self.t("compare_started_title"), self.t("compare_started_text", from_item=str(self.compare_from_combo2.currentText()), to_item=str(self.compare_to_combo2.currentText())))
+
     def on_continue(self) -> None:
         if not self.cli_candidate:
             QMessageBox.warning(
@@ -2322,17 +2633,7 @@ class MainWindow(QMainWindow):
         self.settings["output_dir"] = default_output
         self.save_settings()
 
-        dialog = SnapshotCompareDialog(
-            project_file=Path(project),
-            cli_path=self.cli_candidate.path,
-            git_path=self.git_path,
-            language=self.language,
-            translate=self.t,
-            settings=self.settings,
-            save_settings_cb=self.save_settings,
-            parent=self,
-        )
-        dialog.exec()
+        self.show_compare_page(project=project, output_dir=default_output)
 
 
 def main() -> None:
