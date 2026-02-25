@@ -529,19 +529,30 @@ def run_subprocess(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     if sys.platform.startswith("win"):
         flags = int(kwargs.pop("creationflags", 0))
         kwargs["creationflags"] = flags | int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        startupinfo = kwargs.pop("startupinfo", None)
+        if startupinfo is None:
+            startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        kwargs["startupinfo"] = startupinfo
     return subprocess.run(cmd, **kwargs)
 
 
 def probe_kicad_cli(path: Path) -> CliCandidate | None:
-    try:
-        result = run_subprocess(
-            [str(path), "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except Exception:
+    result: subprocess.CompletedProcess[str] | None = None
+    for timeout_sec in (5, 10):
+        try:
+            result = run_subprocess(
+                [str(path), "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            break
+        except Exception:
+            continue
+    if result is None:
         return None
 
     output = (result.stdout or "").strip() or (result.stderr or "").strip()
@@ -3710,15 +3721,23 @@ class MainWindow(QMainWindow):
 
         self.git_path = git_path
         self.git_path_input.setText(git_path)
-        try:
-            result = run_subprocess(
-                [git_path, "--version"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-        except Exception:
+        result: subprocess.CompletedProcess[str] | None = None
+        for cmd in ([git_path, "--version"], ["git", "--version"]):
+            for timeout_sec in (5, 10):
+                try:
+                    result = run_subprocess(
+                        cmd,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_sec,
+                    )
+                    break
+                except Exception:
+                    continue
+            if result is not None:
+                break
+        if result is None:
             self.set_git_status("git_check_failed", "warn")
             return
 
