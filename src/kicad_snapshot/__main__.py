@@ -589,6 +589,9 @@ def likely_install_paths() -> list[Path]:
         roots = [
             os.environ.get("ProgramFiles"),
             os.environ.get("ProgramFiles(x86)"),
+            # Per-user installer location (e.g. %LOCALAPPDATA%\\Programs\\KiCad\\9.0\\bin)
+            os.environ.get("LOCALAPPDATA"),
+            str(Path.home() / "AppData" / "Local"),
             r"C:\Program Files",
             r"C:\Program Files (x86)",
         ]
@@ -600,6 +603,8 @@ def likely_install_paths() -> list[Path]:
                 continue
             candidates.extend(root_path.glob("KiCad/*/bin/kicad-cli.exe"))
             candidates.extend(root_path.glob("KiCad/bin/kicad-cli.exe"))
+            candidates.extend(root_path.glob("Programs/KiCad/*/bin/kicad-cli.exe"))
+            candidates.extend(root_path.glob("Programs/KiCad/bin/kicad-cli.exe"))
     else:
         unix_paths = [
             "/usr/bin/kicad-cli",
