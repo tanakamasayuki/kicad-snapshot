@@ -9,7 +9,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -2901,37 +2900,18 @@ class MainWindow(QMainWindow):
             return
         from_id = self._compare_pending_from_id
         to_id = self._compare_pending_to_id
-        t0 = time.perf_counter()
         try:
-            t_load0 = time.perf_counter()
             before_map = self._load_snapshot_source_map(from_id)
-            t_load1 = time.perf_counter()
             after_map = self._load_snapshot_source_map(to_id)
-            t_load2 = time.perf_counter()
-            print(
-                f"[perf] open_compare/load_maps before={t_load1 - t_load0:.3f}s after={t_load2 - t_load1:.3f}s "
-                f"before_files={len(before_map)} after_files={len(after_map)}",
-                flush=True,
-            )
             self.compare_from_id = from_id
             self.compare_to_id = to_id
             self.compare_before_map = before_map
             self.compare_after_map = after_map
-            t_prep0 = time.perf_counter()
             self._prepare_compare_temp_dirs()
-            t_prep1 = time.perf_counter()
-            t_list0 = time.perf_counter()
             self.populate_compare_item_list()
-            t_list1 = time.perf_counter()
             if self.compare_item_list.count() > 0:
                 self.compare_item_list.setCurrentRow(0)
                 self._start_compare_precache()
-            print(
-                f"[perf] show_compare_page prep_tmp={t_prep1 - t_prep0:.3f}s "
-                f"populate_list={t_list1 - t_list0:.3f}s total={time.perf_counter() - t0:.3f}s "
-                f"targets={len(self.compare_targets)}",
-                flush=True,
-            )
         except Exception as exc:
             self.compare_status_label.setText(str(exc))
             self.compare_status_label.setStyleSheet("color: #b00020;")
@@ -2945,23 +2925,14 @@ class MainWindow(QMainWindow):
         self.compare_targets.clear()
         if not self.compare_before_map and not self.compare_after_map:
             return
-        t0 = time.perf_counter()
         self._compare_tmp_before_obj = tempfile.TemporaryDirectory(prefix="ksnap_cmp_before_")
         self._compare_tmp_after_obj = tempfile.TemporaryDirectory(prefix="ksnap_cmp_after_")
         self._compare_tmp_render_obj = tempfile.TemporaryDirectory(prefix="ksnap_cmp_render_")
         self.compare_before_root = Path(self._compare_tmp_before_obj.name)
         self.compare_after_root = Path(self._compare_tmp_after_obj.name)
         self.compare_render_root = Path(self._compare_tmp_render_obj.name)
-        t_w0 = time.perf_counter()
         write_file_map(self.compare_before_root, self.compare_before_map)
-        t_w1 = time.perf_counter()
         write_file_map(self.compare_after_root, self.compare_after_map)
-        t_w2 = time.perf_counter()
-        print(
-            f"[perf] prepare_tmp mkd={t_w0 - t0:.3f}s write_before={t_w1 - t_w0:.3f}s "
-            f"write_after={t_w2 - t_w1:.3f}s total={t_w2 - t0:.3f}s",
-            flush=True,
-        )
 
     def _cleanup_compare_temp_dirs(self) -> None:
         if hasattr(self, "compare_status_refresh_timer"):
@@ -2982,7 +2953,6 @@ class MainWindow(QMainWindow):
         self.compare_render_root = None
 
     def populate_compare_item_list(self) -> None:
-        t0 = time.perf_counter()
         self.compare_item_list.clear()
         self.compare_targets.clear()
         self.compare_target_labels.clear()
@@ -2994,12 +2964,10 @@ class MainWindow(QMainWindow):
         if self.compare_before_root is None or self.compare_after_root is None:
             return
 
-        t_scan0 = time.perf_counter()
         sch_paths = sorted(
             {p.relative_to(self.compare_before_root).as_posix() for p in self.compare_before_root.rglob("*.kicad_sch")}
             | {p.relative_to(self.compare_after_root).as_posix() for p in self.compare_after_root.rglob("*.kicad_sch")}
         )
-        t_scan1 = time.perf_counter()
         for rel_path in sch_paths:
             target = {"kind": "sch", "path": rel_path, "layer": None}
             self.compare_targets.append(target)
@@ -3012,8 +2980,6 @@ class MainWindow(QMainWindow):
             {p.relative_to(self.compare_before_root).as_posix() for p in self.compare_before_root.rglob("*.kicad_pcb")}
             | {p.relative_to(self.compare_after_root).as_posix() for p in self.compare_after_root.rglob("*.kicad_pcb")}
         )
-        t_scan2 = time.perf_counter()
-        t_layer_total = 0.0
         for rel_path in pcb_paths:
             target = {"kind": "pcb", "path": rel_path, "layer": None}
             self.compare_targets.append(target)
@@ -3025,7 +2991,6 @@ class MainWindow(QMainWindow):
             layers: list[str] = []
             before_pcb = self.compare_before_root / rel_path
             after_pcb = self.compare_after_root / rel_path
-            t_layer0 = time.perf_counter()
             if before_pcb.exists() and self.cli_candidate is not None:
                 layers.extend(detect_pcb_layers(self.cli_candidate.path, before_pcb))
             elif before_pcb.exists():
@@ -3034,7 +2999,6 @@ class MainWindow(QMainWindow):
                 layers.extend(detect_pcb_layers(self.cli_candidate.path, after_pcb))
             elif after_pcb.exists():
                 layers.extend(parse_pcb_layers_from_file(after_pcb))
-            t_layer_total += time.perf_counter() - t_layer0
             for layer in list(dict.fromkeys(layers)):
                 target = {"kind": "pcb", "path": rel_path, "layer": layer}
                 self.compare_targets.append(target)
@@ -3055,12 +3019,6 @@ class MainWindow(QMainWindow):
             self.compare_status_label.setStyleSheet("color: #2b7a0b;")
             if not self.compare_status_refresh_timer.isActive():
                 self.compare_status_refresh_timer.start()
-        t_end = time.perf_counter()
-        print(
-            f"[perf] populate_items sch_scan={t_scan1 - t_scan0:.3f}s pcb_scan={t_scan2 - t_scan1:.3f}s "
-            f"layer_detect={t_layer_total:.3f}s total={t_end - t0:.3f}s sch={len(sch_paths)} pcb={len(pcb_paths)}",
-            flush=True,
-        )
 
     def on_compare_item_selected(self, row: int) -> None:
         if row < 0 or row >= len(self.compare_targets):
