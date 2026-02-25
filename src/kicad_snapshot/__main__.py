@@ -2475,6 +2475,11 @@ class MainWindow(QMainWindow):
         self.save_settings()
         super().closeEvent(event)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "compare_zoom_mode") and self.compare_zoom_mode == "fit":
+            self._render_compare_image_labels()
+
     def _build_snapshot_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -2539,6 +2544,7 @@ class MainWindow(QMainWindow):
 
         self.snapshot_timeline_list = QListWidget()
         self.snapshot_timeline_list.currentRowChanged.connect(self.on_snapshot_timeline_row_changed)
+        self.snapshot_timeline_list.itemDoubleClicked.connect(self.on_snapshot_timeline_double_clicked)
         layout.addWidget(self.snapshot_timeline_list, 1)
 
         compare_col = QVBoxLayout()
@@ -2615,6 +2621,19 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(6)
         self.compare_preview_title = QLabel(self.t("compare_image_title"))
         right_layout.addWidget(self.compare_preview_title)
+        self.compare_image_scrolls: dict[str, QScrollArea] = {}
+        zoom_row = QHBoxLayout()
+        self.compare_zoom_out_btn = QPushButton(self.t("compare_image_zoom_out"))
+        self.compare_zoom_in_btn = QPushButton(self.t("compare_image_zoom_in"))
+        self.compare_zoom_fit_btn = QPushButton(self.t("compare_image_zoom_fit"))
+        self.compare_zoom_out_btn.clicked.connect(self.on_compare_zoom_out)
+        self.compare_zoom_in_btn.clicked.connect(self.on_compare_zoom_in)
+        self.compare_zoom_fit_btn.clicked.connect(self.on_compare_zoom_fit)
+        zoom_row.addWidget(self.compare_zoom_out_btn)
+        zoom_row.addWidget(self.compare_zoom_in_btn)
+        zoom_row.addWidget(self.compare_zoom_fit_btn)
+        zoom_row.addStretch(1)
+        right_layout.addLayout(zoom_row)
         self.compare_image_tabs = QTabWidget()
         self.compare_diff_image_label = QLabel()
         self.compare_before_image_label = QLabel()
@@ -2622,9 +2641,9 @@ class MainWindow(QMainWindow):
         for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
             label.setAlignment(Qt.AlignCenter)
             label.setText(self.t("compare_image_not_available"))
-        self.compare_image_tabs.addTab(self._wrap_compare_image_label(self.compare_diff_image_label), self.t("compare_image_diff"))
-        self.compare_image_tabs.addTab(self._wrap_compare_image_label(self.compare_before_image_label), self.t("compare_image_before"))
-        self.compare_image_tabs.addTab(self._wrap_compare_image_label(self.compare_after_image_label), self.t("compare_image_after"))
+        self.compare_image_tabs.addTab(self._wrap_compare_image_label("diff", self.compare_diff_image_label), self.t("compare_image_diff"))
+        self.compare_image_tabs.addTab(self._wrap_compare_image_label("before", self.compare_before_image_label), self.t("compare_image_before"))
+        self.compare_image_tabs.addTab(self._wrap_compare_image_label("after", self.compare_after_image_label), self.t("compare_image_after"))
         right_layout.addWidget(self.compare_image_tabs, 1)
 
         content_split.addWidget(left_panel)
@@ -2641,6 +2660,12 @@ class MainWindow(QMainWindow):
         self.compare_after_map: dict[str, bytes] = {}
         self.compare_targets: list[dict[str, str | None]] = []
         self.compare_render_cache: dict[str, tuple[QImage, QImage, QImage]] = {}
+        self.compare_before_image_raw: QImage | None = None
+        self.compare_after_image_raw: QImage | None = None
+        self.compare_diff_image_raw: QImage | None = None
+        self.compare_zoom_mode = "fit"
+        self.compare_zoom_scale = 1.0
+        self._compare_syncing_scroll = False
         self.compare_before_root: Path | None = None
         self.compare_after_root: Path | None = None
         self.compare_render_root: Path | None = None
@@ -2654,13 +2679,14 @@ class MainWindow(QMainWindow):
         self.compare_back_btn.clicked.connect(self.show_snapshot_page_from_state)
         actions.addWidget(self.compare_back_btn)
         layout.addLayout(actions)
+        self._connect_compare_image_scroll_sync()
 
         return page
 
     def show_startup_page(self) -> None:
         self.page_stack.setCurrentWidget(self.startup_page)
 
-    def _wrap_compare_image_label(self, label: QLabel) -> QWidget:
+    def _wrap_compare_image_label(self, key: str, label: QLabel) -> QWidget:
         wrap = QWidget()
         layout = QVBoxLayout(wrap)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2668,6 +2694,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(False)
         scroll.setWidget(label)
+        self.compare_image_scrolls[key] = scroll
         layout.addWidget(scroll, 1)
         return wrap
 
@@ -2812,6 +2839,9 @@ class MainWindow(QMainWindow):
         if row >= self.snapshot_from_combo.count():
             return
         self.snapshot_from_combo.setCurrentIndex(row)
+
+    def on_snapshot_timeline_double_clicked(self, _item: QListWidgetItem) -> None:
+        self.open_compare_from_snapshot()
 
     def on_snapshot_create_backup(self) -> None:
         if self.snapshot_active_project is None:
@@ -2961,6 +2991,8 @@ class MainWindow(QMainWindow):
         cached = self.compare_render_cache.get(key)
         if cached is not None:
             self._set_compare_images(*cached)
+            self.compare_status_label.setText(self.t("compare_image_status_ready"))
+            self.compare_status_label.setStyleSheet("color: #2b7a0b;")
             return
 
         self.compare_status_label.setText(self.t("compare_image_rendering"))
@@ -3045,23 +3077,103 @@ class MainWindow(QMainWindow):
         return svgs[0] if svgs else None
 
     def _set_compare_images(self, before_img: QImage, after_img: QImage, diff_img: QImage) -> None:
-        self.compare_diff_image_label.setPixmap(QPixmap.fromImage(diff_img))
-        self.compare_before_image_label.setPixmap(QPixmap.fromImage(before_img))
-        self.compare_after_image_label.setPixmap(QPixmap.fromImage(after_img))
-        self.compare_diff_image_label.resize(diff_img.size())
-        self.compare_before_image_label.resize(before_img.size())
-        self.compare_after_image_label.resize(after_img.size())
+        self.compare_before_image_raw = before_img
+        self.compare_after_image_raw = after_img
+        self.compare_diff_image_raw = diff_img
+        self.compare_zoom_mode = "fit"
+        self.compare_zoom_scale = 1.0
+        self._render_compare_image_labels()
         self.compare_image_tabs.setCurrentIndex(0)
 
     def _reset_compare_preview(self) -> None:
+        self.compare_before_image_raw = None
+        self.compare_after_image_raw = None
+        self.compare_diff_image_raw = None
         for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
             label.clear()
             label.setText(self.t("compare_image_not_available"))
 
     def _set_compare_rendering_text(self) -> None:
+        self.compare_before_image_raw = None
+        self.compare_after_image_raw = None
+        self.compare_diff_image_raw = None
         for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
             label.clear()
             label.setText(self.t("compare_image_rendering"))
+
+    def _connect_compare_image_scroll_sync(self) -> None:
+        for scroll in self.compare_image_scrolls.values():
+            scroll.horizontalScrollBar().valueChanged.connect(self.on_compare_image_scroll_changed)
+            scroll.verticalScrollBar().valueChanged.connect(self.on_compare_image_scroll_changed)
+
+    def on_compare_image_scroll_changed(self, _: int) -> None:
+        if self._compare_syncing_scroll:
+            return
+        source_bar = self.sender()
+        if source_bar is None:
+            return
+        self._compare_syncing_scroll = True
+        try:
+            source_max = source_bar.maximum()
+            ratio = 0.0 if source_max <= 0 else source_bar.value() / source_max
+            source_is_vertical = source_bar.orientation() == Qt.Vertical
+            for scroll in self.compare_image_scrolls.values():
+                target_bar = scroll.verticalScrollBar() if source_is_vertical else scroll.horizontalScrollBar()
+                if target_bar is source_bar:
+                    continue
+                tmax = target_bar.maximum()
+                target_bar.setValue(int(round(ratio * tmax)) if tmax > 0 else 0)
+        finally:
+            self._compare_syncing_scroll = False
+
+    def on_compare_zoom_fit(self) -> None:
+        self.compare_zoom_mode = "fit"
+        self._render_compare_image_labels()
+
+    def on_compare_zoom_in(self) -> None:
+        self.compare_zoom_mode = "manual"
+        self.compare_zoom_scale = min(self.compare_zoom_scale * 1.25, 8.0)
+        self._render_compare_image_labels()
+
+    def on_compare_zoom_out(self) -> None:
+        self.compare_zoom_mode = "manual"
+        self.compare_zoom_scale = max(self.compare_zoom_scale / 1.25, 0.1)
+        self._render_compare_image_labels()
+
+    def _render_compare_image_labels(self) -> None:
+        fit_scale = self._compute_compare_fit_scale() if self.compare_zoom_mode == "fit" else None
+        self._set_compare_image_for_key(self.compare_before_image_label, self.compare_before_image_raw, fit_scale)
+        self._set_compare_image_for_key(self.compare_after_image_label, self.compare_after_image_raw, fit_scale)
+        self._set_compare_image_for_key(self.compare_diff_image_label, self.compare_diff_image_raw, fit_scale)
+
+    def _compute_compare_fit_scale(self) -> float:
+        images = [img for img in [self.compare_before_image_raw, self.compare_after_image_raw, self.compare_diff_image_raw] if img is not None]
+        if not images:
+            return 1.0
+        max_w = max(img.width() for img in images)
+        max_h = max(img.height() for img in images)
+        if max_w <= 0 or max_h <= 0:
+            return 1.0
+        scroll = self.compare_image_scrolls.get("diff") or next(iter(self.compare_image_scrolls.values()), None)
+        if scroll is None:
+            return 1.0
+        vp = scroll.viewport().size()
+        scale = min(max(1, vp.width()) / max_w, max(1, vp.height()) / max_h)
+        return max(0.05, min(scale, 8.0))
+
+    def _set_compare_image_for_key(self, label: QLabel, image: QImage | None, fit_scale: float | None) -> None:
+        if image is None:
+            return
+        pixmap = QPixmap.fromImage(image)
+        if self.compare_zoom_mode == "fit":
+            scale = fit_scale if fit_scale is not None else 1.0
+        else:
+            scale = self.compare_zoom_scale
+        w = max(1, int(pixmap.width() * scale))
+        h = max(1, int(pixmap.height() * scale))
+        scaled = pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(scaled)
+        label.resize(scaled.size())
 
     def refresh_compare_timeline(self) -> None:
         if self.compare_active_project is None:
@@ -3262,6 +3374,12 @@ class MainWindow(QMainWindow):
             self.compare_items_label.setText(self.t("compare_image_target"))
         if hasattr(self, "compare_preview_title"):
             self.compare_preview_title.setText(self.t("compare_image_title"))
+        if hasattr(self, "compare_zoom_out_btn"):
+            self.compare_zoom_out_btn.setText(self.t("compare_image_zoom_out"))
+        if hasattr(self, "compare_zoom_in_btn"):
+            self.compare_zoom_in_btn.setText(self.t("compare_image_zoom_in"))
+        if hasattr(self, "compare_zoom_fit_btn"):
+            self.compare_zoom_fit_btn.setText(self.t("compare_image_zoom_fit"))
         if hasattr(self, "compare_image_tabs"):
             self.compare_image_tabs.setTabText(0, self.t("compare_image_diff"))
             self.compare_image_tabs.setTabText(1, self.t("compare_image_before"))
