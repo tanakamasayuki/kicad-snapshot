@@ -166,6 +166,11 @@ TRANSLATIONS = {
         "compare_image_zoom_out": "Zoom Out",
         "compare_image_zoom_in": "Zoom In",
         "compare_image_zoom_fit": "Fit",
+        "compare_item_status_pending": "Pending",
+        "compare_item_status_rendering": "Rendering",
+        "compare_item_status_diff": "Diff",
+        "compare_item_status_same": "Same",
+        "compare_item_status_error": "Error",
         "compare_backup_created": "Backup created: {path}",
         "compare_git_commit_need_msg": "Commit message is required.",
         "compare_git_ok_title": "Git",
@@ -273,6 +278,11 @@ TRANSLATIONS = {
         "compare_image_zoom_out": "縮小",
         "compare_image_zoom_in": "拡大",
         "compare_image_zoom_fit": "フィット",
+        "compare_item_status_pending": "未完了",
+        "compare_item_status_rendering": "レンダリング中",
+        "compare_item_status_diff": "差分あり",
+        "compare_item_status_same": "差分なし",
+        "compare_item_status_error": "エラー",
         "compare_backup_created": "バックアップを作成しました: {path}",
         "compare_git_commit_need_msg": "コミットメッセージを入力してください。",
         "compare_git_ok_title": "Git",
@@ -892,6 +902,18 @@ def make_pixel_diff_image(before: QImage, after: QImage) -> QImage:
                 # Highlight changed pixels in red.
                 diff.setPixel(x, y, 0xFFFF4040)
     return diff
+
+
+def images_different(before: QImage, after: QImage) -> bool:
+    width = max(before.width(), after.width())
+    height = max(before.height(), after.height())
+    b = pad_image(before, width, height)
+    a = pad_image(after, width, height)
+    for y in range(height):
+        for x in range(width):
+            if b.pixel(x, y) != a.pixel(x, y):
+                return True
+    return False
 
 
 def normalize_image_sizes(before: QImage, after: QImage) -> tuple[QImage, QImage]:
@@ -2664,6 +2686,8 @@ class MainWindow(QMainWindow):
         self.compare_before_map: dict[str, bytes] = {}
         self.compare_after_map: dict[str, bytes] = {}
         self.compare_targets: list[dict[str, str | None]] = []
+        self.compare_target_labels: list[str] = []
+        self.compare_target_status: dict[str, str] = {}
         self.compare_render_cache: dict[str, tuple[QImage, QImage, QImage]] = {}
         self.compare_before_image_raw: QImage | None = None
         self.compare_after_image_raw: QImage | None = None
@@ -2680,7 +2704,11 @@ class MainWindow(QMainWindow):
         self._compare_precache_thread: threading.Thread | None = None
         self._compare_precache_stop = threading.Event()
         self._compare_render_lock = threading.Lock()
+        self._compare_status_lock = threading.Lock()
         self.compare_precache_active = False
+        self.compare_status_refresh_timer = QTimer(self)
+        self.compare_status_refresh_timer.setInterval(300)
+        self.compare_status_refresh_timer.timeout.connect(self._refresh_compare_item_list_labels)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -2936,6 +2964,8 @@ class MainWindow(QMainWindow):
         )
 
     def _cleanup_compare_temp_dirs(self) -> None:
+        if hasattr(self, "compare_status_refresh_timer"):
+            self.compare_status_refresh_timer.stop()
         self.compare_precache_active = False
         self._compare_precache_stop.set()
         if self._compare_precache_thread is not None and self._compare_precache_thread.is_alive():
@@ -2955,6 +2985,9 @@ class MainWindow(QMainWindow):
         t0 = time.perf_counter()
         self.compare_item_list.clear()
         self.compare_targets.clear()
+        self.compare_target_labels.clear()
+        with self._compare_status_lock:
+            self.compare_target_status.clear()
         self._reset_compare_preview()
         if self.compare_active_project is None:
             return
@@ -2968,8 +3001,12 @@ class MainWindow(QMainWindow):
         )
         t_scan1 = time.perf_counter()
         for rel_path in sch_paths:
-            self.compare_targets.append({"kind": "sch", "path": rel_path, "layer": None})
-            self.compare_item_list.addItem(f"SCH / {rel_path}")
+            target = {"kind": "sch", "path": rel_path, "layer": None}
+            self.compare_targets.append(target)
+            label = f"SCH / {rel_path}"
+            self.compare_target_labels.append(label)
+            with self._compare_status_lock:
+                self.compare_target_status[self._compare_target_key(target)] = "pending"
 
         pcb_paths = sorted(
             {p.relative_to(self.compare_before_root).as_posix() for p in self.compare_before_root.rglob("*.kicad_pcb")}
@@ -2978,8 +3015,12 @@ class MainWindow(QMainWindow):
         t_scan2 = time.perf_counter()
         t_layer_total = 0.0
         for rel_path in pcb_paths:
-            self.compare_targets.append({"kind": "pcb", "path": rel_path, "layer": None})
-            self.compare_item_list.addItem(f"PCB / {rel_path} / board")
+            target = {"kind": "pcb", "path": rel_path, "layer": None}
+            self.compare_targets.append(target)
+            label = f"PCB / {rel_path} / board"
+            self.compare_target_labels.append(label)
+            with self._compare_status_lock:
+                self.compare_target_status[self._compare_target_key(target)] = "pending"
 
             layers: list[str] = []
             before_pcb = self.compare_before_root / rel_path
@@ -2995,15 +3036,25 @@ class MainWindow(QMainWindow):
                 layers.extend(parse_pcb_layers_from_file(after_pcb))
             t_layer_total += time.perf_counter() - t_layer0
             for layer in list(dict.fromkeys(layers)):
-                self.compare_targets.append({"kind": "pcb", "path": rel_path, "layer": layer})
-                self.compare_item_list.addItem(f"PCB / {rel_path} / {layer}")
+                target = {"kind": "pcb", "path": rel_path, "layer": layer}
+                self.compare_targets.append(target)
+                label = f"PCB / {rel_path} / {layer}"
+                self.compare_target_labels.append(label)
+                with self._compare_status_lock:
+                    self.compare_target_status[self._compare_target_key(target)] = "pending"
+
+        self._refresh_compare_item_list_labels()
 
         if self.compare_item_list.count() == 0:
             self.compare_status_label.setText(self.t("compare_image_no_targets"))
             self.compare_status_label.setStyleSheet("color: #9a6700;")
+            if self.compare_status_refresh_timer.isActive():
+                self.compare_status_refresh_timer.stop()
         else:
             self.compare_status_label.setText(self.t("compare_image_status_ready"))
             self.compare_status_label.setStyleSheet("color: #2b7a0b;")
+            if not self.compare_status_refresh_timer.isActive():
+                self.compare_status_refresh_timer.start()
         t_end = time.perf_counter()
         print(
             f"[perf] populate_items sch_scan={t_scan1 - t_scan0:.3f}s pcb_scan={t_scan2 - t_scan1:.3f}s "
@@ -3024,6 +3075,9 @@ class MainWindow(QMainWindow):
             self.compare_status_label.setStyleSheet("color: #2b7a0b;")
             return
 
+        with self._compare_status_lock:
+            self.compare_target_status[key] = "rendering"
+        self._refresh_compare_item_list_labels()
         self.compare_status_label.setText(self.t("compare_image_rendering"))
         self.compare_status_label.setStyleSheet("color: #666666;")
         self._set_compare_rendering_text()
@@ -3031,9 +3085,12 @@ class MainWindow(QMainWindow):
         try:
             before_img, after_img, diff_img = self._render_compare_target(target)
         except Exception as exc:
+            with self._compare_status_lock:
+                self.compare_target_status[key] = "error"
             self.compare_status_label.setText(str(exc))
             self.compare_status_label.setStyleSheet("color: #b00020;")
             self._reset_compare_preview()
+            self._refresh_compare_item_list_labels()
             return
         self.compare_render_cache[key] = (before_img, after_img, diff_img)
         self._set_compare_images(before_img, after_img, diff_img)
@@ -3078,10 +3135,26 @@ class MainWindow(QMainWindow):
 
         before_png, after_png, diff_png = self._cache_paths_for_target(target)
         if before_png.exists() and after_png.exists() and diff_png.exists():
+            try:
+                b = QImage(str(before_png))
+                a = QImage(str(after_png))
+                status = "diff" if (not b.isNull() and not a.isNull() and images_different(b, a)) else "same"
+            except Exception:
+                status = "error"
+            with self._compare_status_lock:
+                self.compare_target_status[self._compare_target_key(target)] = status
             return before_png, after_png, diff_png
 
         with self._compare_render_lock:
             if before_png.exists() and after_png.exists() and diff_png.exists():
+                try:
+                    b = QImage(str(before_png))
+                    a = QImage(str(after_png))
+                    status = "diff" if (not b.isNull() and not a.isNull() and images_different(b, a)) else "same"
+                except Exception:
+                    status = "error"
+                with self._compare_status_lock:
+                    self.compare_target_status[self._compare_target_key(target)] = status
                 return before_png, after_png, diff_png
 
             before_src = self.compare_before_root / rel_path
@@ -3113,10 +3186,13 @@ class MainWindow(QMainWindow):
                 after_img = QImage(before_img.width(), before_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
                 after_img.fill(Qt.white)
             before_img, after_img = normalize_image_sizes(before_img, after_img)
+            has_diff = images_different(before_img, after_img)
             diff_img = make_pixel_diff_image(before_img, after_img)
             before_img.save(str(before_png), "PNG")
             after_img.save(str(after_png), "PNG")
             diff_img.save(str(diff_png), "PNG")
+            with self._compare_status_lock:
+                self.compare_target_status[self._compare_target_key(target)] = "diff" if has_diff else "same"
         return before_png, after_png, diff_png
 
     def _export_compare_svg(self, source: Path | None, kind: str, layer: str | None, out_dir: Path) -> Path | None:
@@ -3156,6 +3232,37 @@ class MainWindow(QMainWindow):
             label.clear()
             label.setText(self.t("compare_image_rendering"))
 
+    def _format_compare_list_label(self, base_label: str, status: str) -> str:
+        # Keep status markers language-independent for quick visual scanning.
+        if status == "diff":
+            suffix = " [*]"
+        elif status == "rendering":
+            suffix = " [...]"
+        elif status == "pending":
+            suffix = " [?]"
+        elif status == "same":
+            suffix = ""
+        else:
+            suffix = " [!]"
+        return f"{base_label}{suffix}"
+
+    def _refresh_compare_item_list_labels(self) -> None:
+        if not hasattr(self, "compare_item_list"):
+            return
+        current = self.compare_item_list.currentRow()
+        self.compare_item_list.blockSignals(True)
+        self.compare_item_list.clear()
+        with self._compare_status_lock:
+            for i, base in enumerate(self.compare_target_labels):
+                status = "pending"
+                if i < len(self.compare_targets):
+                    key = self._compare_target_key(self.compare_targets[i])
+                    status = self.compare_target_status.get(key, "pending")
+                self.compare_item_list.addItem(self._format_compare_list_label(base, status))
+        if 0 <= current < self.compare_item_list.count():
+            self.compare_item_list.setCurrentRow(current)
+        self.compare_item_list.blockSignals(False)
+
     def _start_compare_precache(self) -> None:
         if self.compare_precache_active:
             return
@@ -3174,9 +3281,16 @@ class MainWindow(QMainWindow):
             for target in targets:
                 if self._compare_precache_stop.is_set():
                     break
+                key = self._compare_target_key(target)
+                with self._compare_status_lock:
+                    current = self.compare_target_status.get(key, "pending")
+                    if current == "pending":
+                        self.compare_target_status[key] = "rendering"
                 try:
                     self._ensure_compare_target_cache(target)
                 except Exception:
+                    with self._compare_status_lock:
+                        self.compare_target_status[key] = "error"
                     continue
         finally:
             self.compare_precache_active = False
@@ -3464,6 +3578,8 @@ class MainWindow(QMainWindow):
             self.compare_image_tabs.setTabText(0, self.t("compare_image_diff"))
             self.compare_image_tabs.setTabText(1, self.t("compare_image_before"))
             self.compare_image_tabs.setTabText(2, self.t("compare_image_after"))
+        if hasattr(self, "compare_item_list") and hasattr(self, "compare_target_labels"):
+            self._refresh_compare_item_list_labels()
         self.render_cli_status()
         self.render_git_status()
 
