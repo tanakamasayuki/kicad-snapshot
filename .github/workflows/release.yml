@@ -90,7 +90,8 @@ jobs:
         run: |
           $version = "${{ github.event.inputs.version }}"
           $asset = "kicad_snapshot-$version-win-x64"
-          Compress-Archive -Path "dist/kicad_snapshot/*" -DestinationPath "$asset.zip" -Force
+          # Keep top-level folder in archive: kicad_snapshot/...
+          Compress-Archive -Path "dist/kicad_snapshot" -DestinationPath "$asset.zip" -Force
           $hash = (Get-FileHash "$asset.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset.zip" | Out-File -Encoding ascii "$asset.sha256"
 
