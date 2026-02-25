@@ -229,7 +229,7 @@ class MainWindow(QMainWindow):
         content.setVerticalSpacing(18)
         root_layout.addLayout(content)
 
-        self.cli_box = QGroupBox("1) KiCad CLI")
+        self.cli_box = QGroupBox("1) Path Check")
         cli_layout = QVBoxLayout(self.cli_box)
         cli_layout.setSpacing(10)
 
@@ -249,8 +249,19 @@ class MainWindow(QMainWindow):
 
         self.status = QLabel("Status: Checking...")
 
+        git_row = QHBoxLayout()
+        git_label = QLabel("git path (optional)")
+        self.git_path_input = QLineEdit()
+        self.git_path_input.setReadOnly(True)
+        git_row.addWidget(git_label)
+        git_row.addWidget(self.git_path_input, 1)
+
+        self.git_status = QLabel("Git: Checking...")
+
         cli_layout.addLayout(path_row)
         cli_layout.addWidget(self.status)
+        cli_layout.addLayout(git_row)
+        cli_layout.addWidget(self.git_status)
 
         self.project_box = QGroupBox("2) Project")
         project_layout = QVBoxLayout(self.project_box)
@@ -315,6 +326,7 @@ class MainWindow(QMainWindow):
 
         self.load_recent_projects()
         self.auto_detect_cli(initial=True)
+        self.detect_git()
 
     def load_recent_projects(self) -> None:
         self.recent_list.clear()
@@ -415,6 +427,40 @@ class MainWindow(QMainWindow):
 
         self.update_status(True, f"Status: OK (version {best.version_text})")
         self.update_next_state()
+
+    def detect_git(self) -> None:
+        git_path = shutil.which("git")
+        if not git_path:
+            self.git_path_input.setText("")
+            self.git_status.setText("Git: not detected (optional)")
+            self.git_status.setStyleSheet("color: #9a6700;")
+            return
+
+        self.git_path_input.setText(git_path)
+        try:
+            result = subprocess.run(
+                [git_path, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            self.git_status.setText("Git: path found, but version check failed (optional)")
+            self.git_status.setStyleSheet("color: #9a6700;")
+            return
+
+        if result.returncode == 0:
+            version_text = result.stdout.strip() or result.stderr.strip()
+            if version_text:
+                self.git_status.setText(f"Git: OK ({version_text})")
+            else:
+                self.git_status.setText("Git: OK")
+            self.git_status.setStyleSheet("color: #2b7a0b;")
+            return
+
+        self.git_status.setText("Git: path found, but version check failed (optional)")
+        self.git_status.setStyleSheet("color: #9a6700;")
 
     def open_project(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
