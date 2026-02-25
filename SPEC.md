@@ -63,6 +63,13 @@ who may not use Git.
     -   `design-block-lib-table`
 -   No optional presets (minimal set only)
 
+Reference (KiCad built-in backup):
+
+-   KiCad creates an automatic backup when changes exist and more than
+    5 minutes have passed since the last backup
+-   Backups older than 25 generations are automatically removed
+-   Generation count and auto-backup interval can be changed in KiCad settings
+
 ### 2. Diff Comparison
 
 Supported comparisons:
