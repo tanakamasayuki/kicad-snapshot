@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import locale
 import os
 import re
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -97,6 +99,7 @@ TRANSLATIONS = {
         "snapshot_selected_project": "Project: {project}",
         "snapshot_open_compare": "Open Compare Screen",
         "snapshot_back": "Back",
+        "compare_preview_title": "Preview",
         "footer": "Settings file: {path}",
         "dlg_select_cli": "Select kicad-cli",
         "dlg_open_project": "Open KiCad Project",
@@ -147,6 +150,8 @@ TRANSLATIONS = {
         "compare_visual_empty": "(empty)",
         "compare_image_title": "Image Diff",
         "compare_image_target": "Target",
+        "compare_image_rendering": "Rendering...",
+        "compare_image_status_ready": "Ready.",
         "compare_image_render": "Render",
         "compare_image_status": "Select a sheet/page target and render.",
         "compare_image_no_targets": "No renderable sheet/page target found.",
@@ -196,6 +201,11 @@ TRANSLATIONS = {
         "group_next": "3) 次へ",
         "next_hint": "CLIバージョン確認済みかつプロジェクト選択済みの場合のみ続行できます。",
         "continue": "スナップショット / 比較へ進む",
+        "snapshot_window_title": "スナップショット",
+        "snapshot_selected_project": "プロジェクト: {project}",
+        "snapshot_open_compare": "比較画面を開く",
+        "snapshot_back": "戻る",
+        "compare_preview_title": "プレビュー",
         "footer": "設定ファイル: {path}",
         "dlg_select_cli": "kicad-cli を選択",
         "dlg_open_project": "KiCad プロジェクトを開く",
@@ -246,6 +256,8 @@ TRANSLATIONS = {
         "compare_visual_empty": "(空)",
         "compare_image_title": "画像差分",
         "compare_image_target": "対象",
+        "compare_image_rendering": "レンダリング中...",
+        "compare_image_status_ready": "準備完了。",
         "compare_image_render": "描画",
         "compare_image_status": "シート/ページを選択して描画してください。",
         "compare_image_no_targets": "描画可能なシート/ページが見つかりません。",
@@ -294,6 +306,11 @@ TRANSLATIONS = {
         "group_next": "3) 下一步",
         "next_hint": "仅当 CLI 版本已确认且已选择项目时可继续。",
         "continue": "继续到快照 / 对比",
+        "snapshot_window_title": "快照",
+        "snapshot_selected_project": "项目: {project}",
+        "snapshot_open_compare": "打开对比界面",
+        "snapshot_back": "返回",
+        "compare_preview_title": "预览",
         "footer": "设置文件: {path}",
         "dlg_select_cli": "选择 kicad-cli",
         "dlg_open_project": "打开 KiCad 项目",
@@ -332,6 +349,11 @@ TRANSLATIONS = {
         "group_next": "3) Suivant",
         "next_hint": "Continuer est possible seulement si la version CLI est valide et qu'un projet est selectionne.",
         "continue": "Continuer vers Snapshot / Compare",
+        "snapshot_window_title": "Snapshots",
+        "snapshot_selected_project": "Projet: {project}",
+        "snapshot_open_compare": "Ouvrir l'ecran de comparaison",
+        "snapshot_back": "Retour",
+        "compare_preview_title": "Apercu",
         "footer": "Fichier de configuration: {path}",
         "dlg_select_cli": "Selectionner kicad-cli",
         "dlg_open_project": "Ouvrir un projet KiCad",
@@ -370,6 +392,11 @@ TRANSLATIONS = {
         "group_next": "3) Weiter",
         "next_hint": "Weiter nur moglich, wenn CLI-Version bestatigt und ein Projekt ausgewahlt wurde.",
         "continue": "Weiter zu Snapshot / Compare",
+        "snapshot_window_title": "Snapshots",
+        "snapshot_selected_project": "Projekt: {project}",
+        "snapshot_open_compare": "Vergleichsansicht offnen",
+        "snapshot_back": "Zuruck",
+        "compare_preview_title": "Vorschau",
         "footer": "Einstellungsdatei: {path}",
         "dlg_select_cli": "kicad-cli auswahlen",
         "dlg_open_project": "KiCad-Projekt offnen",
@@ -763,29 +790,42 @@ def export_svg_bundle_with_kicad_cli(
         ]
     elif kind == "pcb":
         # Try broad layer sets first to get a board-wide render on varying KiCad versions.
-        layer_sets = [pcb_layers] if pcb_layers else [
-            "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts",
-            "F.Cu,B.Cu",
-            None,
-        ]
-        commands = [
-            (
-                [
-                    str(cli_path),
-                    "pcb",
-                    "export",
-                    "svg",
-                    "--layers",
-                    layers,
-                    str(source_file),
-                    "-o",
-                    str(out_dir),
-                ]
-                if layers is not None
-                else [str(cli_path), "pcb", "export", "svg", str(source_file), "-o", str(out_dir)]
-            )
-            for layers in layer_sets
-        ]
+        if pcb_layers:
+            # Some KiCad versions expect file output when --layers is specified.
+            out_file = out_dir / "layer.svg"
+            commands = [[
+                str(cli_path),
+                "pcb",
+                "export",
+                "svg",
+                "--layers",
+                pcb_layers,
+                str(source_file),
+                "-o",
+                str(out_file),
+            ]]
+        else:
+            layer_sets = [
+                "F.Cu,B.Cu,F.SilkS,B.SilkS,Edge.Cuts",
+                "F.Cu,B.Cu",
+                "F.Cu",
+            ]
+            commands = [
+                (
+                    [
+                        str(cli_path),
+                        "pcb",
+                        "export",
+                        "svg",
+                        "--layers",
+                        layers,
+                        str(source_file),
+                        "-o",
+                        str(out_dir / "board.svg"),
+                    ]
+                )
+                for layers in layer_sets
+            ]
     else:
         raise RuntimeError(f"Unsupported kind: {kind}")
 
@@ -2429,6 +2469,7 @@ class MainWindow(QMainWindow):
         self.resize(width, height)
 
     def closeEvent(self, event) -> None:
+        self._cleanup_compare_temp_dirs()
         self.settings["window_width"] = self.width()
         self.settings["window_height"] = self.height()
         self.save_settings()
@@ -2562,7 +2603,7 @@ class MainWindow(QMainWindow):
         self.compare_items_label = QLabel(self.t("compare_image_target"))
         left_layout.addWidget(self.compare_items_label)
         self.compare_item_list = QListWidget()
-        self.compare_item_list.currentTextChanged.connect(self.on_compare_item_selected)
+        self.compare_item_list.currentRowChanged.connect(self.on_compare_item_selected)
         left_layout.addWidget(self.compare_item_list, 1)
         self.compare_status_label = QLabel(self.t("compare_image_rendering"))
         self.compare_status_label.setStyleSheet("color: #666666;")
@@ -2572,13 +2613,19 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)
-        self.compare_preview_title = QLabel("Preview")
+        self.compare_preview_title = QLabel(self.t("compare_image_title"))
         right_layout.addWidget(self.compare_preview_title)
-        self.compare_preview_body = QLabel(self.t("compare_image_not_available"))
-        self.compare_preview_body.setWordWrap(True)
-        self.compare_preview_body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.compare_preview_body.setStyleSheet("color: #666666;")
-        right_layout.addWidget(self.compare_preview_body, 1)
+        self.compare_image_tabs = QTabWidget()
+        self.compare_diff_image_label = QLabel()
+        self.compare_before_image_label = QLabel()
+        self.compare_after_image_label = QLabel()
+        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
+            label.setAlignment(Qt.AlignCenter)
+            label.setText(self.t("compare_image_not_available"))
+        self.compare_image_tabs.addTab(self._wrap_compare_image_label(self.compare_diff_image_label), self.t("compare_image_diff"))
+        self.compare_image_tabs.addTab(self._wrap_compare_image_label(self.compare_before_image_label), self.t("compare_image_before"))
+        self.compare_image_tabs.addTab(self._wrap_compare_image_label(self.compare_after_image_label), self.t("compare_image_after"))
+        right_layout.addWidget(self.compare_image_tabs, 1)
 
         content_split.addWidget(left_panel)
         content_split.addWidget(right_panel)
@@ -2588,6 +2635,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(content_split, 1)
 
         self.compare_active_project: Path | None = None
+        self.compare_from_id: str | None = None
+        self.compare_to_id: str | None = None
+        self.compare_before_map: dict[str, bytes] = {}
+        self.compare_after_map: dict[str, bytes] = {}
+        self.compare_targets: list[dict[str, str | None]] = []
+        self.compare_render_cache: dict[str, tuple[QImage, QImage, QImage]] = {}
+        self.compare_before_root: Path | None = None
+        self.compare_after_root: Path | None = None
+        self.compare_render_root: Path | None = None
+        self._compare_tmp_before_obj: tempfile.TemporaryDirectory[str] | None = None
+        self._compare_tmp_after_obj: tempfile.TemporaryDirectory[str] | None = None
+        self._compare_tmp_render_obj: tempfile.TemporaryDirectory[str] | None = None
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -2600,6 +2659,17 @@ class MainWindow(QMainWindow):
 
     def show_startup_page(self) -> None:
         self.page_stack.setCurrentWidget(self.startup_page)
+
+    def _wrap_compare_image_label(self, label: QLabel) -> QWidget:
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        scroll.setWidget(label)
+        layout.addWidget(scroll, 1)
+        return wrap
 
     def show_snapshot_page(self, project: str, output_dir: str) -> None:
         del output_dir
@@ -2626,8 +2696,12 @@ class MainWindow(QMainWindow):
         self.page_stack.setCurrentWidget(self.snapshot_page)
 
     def open_compare_from_snapshot(self) -> None:
+        t0 = time.perf_counter()
         if self.snapshot_active_project is None:
             QMessageBox.warning(self, self.t("warning_project_title"), self.t("warning_project_text"))
+            return
+        if self.cli_candidate is None:
+            QMessageBox.warning(self, self.t("warning_cli_title"), self.t("warning_cli_text"))
             return
         if self.snapshot_from_combo.count() < 1 or self.snapshot_to_combo.count() < 1:
             QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
@@ -2637,7 +2711,46 @@ class MainWindow(QMainWindow):
         if isinstance(from_id, str) and isinstance(to_id, str) and from_id == to_id:
             QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_same"))
             return
-        self.show_compare_page(str(self.snapshot_active_project), "")
+        if not isinstance(from_id, str) or not isinstance(to_id, str):
+            QMessageBox.warning(self, self.t("compare_started_title"), self.t("compare_need_two"))
+            return
+        try:
+            t_load0 = time.perf_counter()
+            before_map = self._load_snapshot_source_map(from_id)
+            t_load1 = time.perf_counter()
+            after_map = self._load_snapshot_source_map(to_id)
+            t_load2 = time.perf_counter()
+        except Exception as exc:
+            QMessageBox.warning(self, self.t("compare_started_title"), str(exc))
+            return
+        print(
+            f"[perf] open_compare/load_maps before={t_load1 - t_load0:.3f}s after={t_load2 - t_load1:.3f}s "
+            f"before_files={len(before_map)} after_files={len(after_map)}",
+            flush=True,
+        )
+        self.show_compare_page(
+            project=str(self.snapshot_active_project),
+            output_dir="",
+            from_id=from_id,
+            to_id=to_id,
+            before_map=before_map,
+            after_map=after_map,
+        )
+        print(f"[perf] open_compare/total {time.perf_counter() - t0:.3f}s", flush=True)
+
+    def _load_snapshot_source_map(self, source_id: str) -> dict[str, bytes]:
+        if self.snapshot_active_project is None:
+            raise RuntimeError(self.t("warning_project_text"))
+        if source_id == "__current_project__":
+            return build_current_project_map(self.snapshot_active_project)
+        item = next((it for it in self.snapshot_items_filtered if it.identifier == source_id), None)
+        if item is None:
+            raise RuntimeError(f"Unknown source id: {source_id}")
+        if item.source == "backup":
+            return build_backup_zip_map(Path(item.identifier))
+        if item.source == "git":
+            return build_git_commit_map(self.snapshot_active_project, item.identifier, self.git_path)
+        raise RuntimeError(f"Unsupported source type: {item.source}")
 
     def refresh_snapshot_timeline(self) -> None:
         self.snapshot_timeline_list.clear()
@@ -2712,35 +2825,119 @@ class MainWindow(QMainWindow):
         self.snapshot_backup_memo_input.clear()
         self.refresh_snapshot_timeline()
 
-    def show_compare_page(self, project: str, output_dir: str) -> None:
+    def show_compare_page(
+        self,
+        project: str,
+        output_dir: str,
+        from_id: str | None = None,
+        to_id: str | None = None,
+        before_map: dict[str, bytes] | None = None,
+        after_map: dict[str, bytes] | None = None,
+    ) -> None:
+        t0 = time.perf_counter()
         del output_dir
         self.compare_active_project = Path(project)
+        self.compare_from_id = from_id
+        self.compare_to_id = to_id
+        self.compare_before_map = before_map or {}
+        self.compare_after_map = after_map or {}
+        t_prep0 = time.perf_counter()
+        self._prepare_compare_temp_dirs()
+        t_prep1 = time.perf_counter()
+        t_list0 = time.perf_counter()
         self.populate_compare_item_list()
+        t_list1 = time.perf_counter()
         self.page_stack.setCurrentWidget(self.compare_page)
+        if self.compare_item_list.count() > 0:
+            QTimer.singleShot(0, lambda: self.compare_item_list.setCurrentRow(0))
+        print(
+            f"[perf] show_compare_page prep_tmp={t_prep1 - t_prep0:.3f}s "
+            f"populate_list={t_list1 - t_list0:.3f}s total={time.perf_counter() - t0:.3f}s "
+            f"targets={len(self.compare_targets)}",
+            flush=True,
+        )
+
+    def _prepare_compare_temp_dirs(self) -> None:
+        self._cleanup_compare_temp_dirs()
+        self.compare_render_cache.clear()
+        self.compare_targets.clear()
+        if not self.compare_before_map and not self.compare_after_map:
+            return
+        t0 = time.perf_counter()
+        self._compare_tmp_before_obj = tempfile.TemporaryDirectory(prefix="ksnap_cmp_before_")
+        self._compare_tmp_after_obj = tempfile.TemporaryDirectory(prefix="ksnap_cmp_after_")
+        self._compare_tmp_render_obj = tempfile.TemporaryDirectory(prefix="ksnap_cmp_render_")
+        self.compare_before_root = Path(self._compare_tmp_before_obj.name)
+        self.compare_after_root = Path(self._compare_tmp_after_obj.name)
+        self.compare_render_root = Path(self._compare_tmp_render_obj.name)
+        t_w0 = time.perf_counter()
+        write_file_map(self.compare_before_root, self.compare_before_map)
+        t_w1 = time.perf_counter()
+        write_file_map(self.compare_after_root, self.compare_after_map)
+        t_w2 = time.perf_counter()
+        print(
+            f"[perf] prepare_tmp mkd={t_w0 - t0:.3f}s write_before={t_w1 - t_w0:.3f}s "
+            f"write_after={t_w2 - t_w1:.3f}s total={t_w2 - t0:.3f}s",
+            flush=True,
+        )
+
+    def _cleanup_compare_temp_dirs(self) -> None:
+        for obj in [self._compare_tmp_before_obj, self._compare_tmp_after_obj, self._compare_tmp_render_obj]:
+            if obj is not None:
+                obj.cleanup()
+        self._compare_tmp_before_obj = None
+        self._compare_tmp_after_obj = None
+        self._compare_tmp_render_obj = None
+        self.compare_before_root = None
+        self.compare_after_root = None
+        self.compare_render_root = None
 
     def populate_compare_item_list(self) -> None:
+        t0 = time.perf_counter()
         self.compare_item_list.clear()
-        self.compare_preview_body.setText(self.t("compare_image_not_available"))
+        self.compare_targets.clear()
+        self._reset_compare_preview()
         if self.compare_active_project is None:
             return
+        if self.compare_before_root is None or self.compare_after_root is None:
+            return
 
-        project_dir = self.compare_active_project.resolve().parent
-        sch_files = sorted(project_dir.rglob("*.kicad_sch"))
-        pcb_files = sorted(project_dir.rglob("*.kicad_pcb"))
+        t_scan0 = time.perf_counter()
+        sch_paths = sorted(
+            {p.relative_to(self.compare_before_root).as_posix() for p in self.compare_before_root.rglob("*.kicad_sch")}
+            | {p.relative_to(self.compare_after_root).as_posix() for p in self.compare_after_root.rglob("*.kicad_sch")}
+        )
+        t_scan1 = time.perf_counter()
+        for rel_path in sch_paths:
+            self.compare_targets.append({"kind": "sch", "path": rel_path, "layer": None})
+            self.compare_item_list.addItem(f"SCH / {rel_path}")
 
-        for sch in sch_files:
-            rel = sch.relative_to(project_dir).as_posix()
-            self.compare_item_list.addItem(f"SCH / {rel}")
+        pcb_paths = sorted(
+            {p.relative_to(self.compare_before_root).as_posix() for p in self.compare_before_root.rglob("*.kicad_pcb")}
+            | {p.relative_to(self.compare_after_root).as_posix() for p in self.compare_after_root.rglob("*.kicad_pcb")}
+        )
+        t_scan2 = time.perf_counter()
+        t_layer_total = 0.0
+        for rel_path in pcb_paths:
+            self.compare_targets.append({"kind": "pcb", "path": rel_path, "layer": None})
+            self.compare_item_list.addItem(f"PCB / {rel_path} / board")
 
-        for pcb in pcb_files:
-            rel = pcb.relative_to(project_dir).as_posix()
-            self.compare_item_list.addItem(f"PCB / {rel} / board")
-            if self.cli_candidate is not None:
-                layers = detect_pcb_layers(self.cli_candidate.path, pcb)
-            else:
-                layers = parse_pcb_layers_from_file(pcb)
-            for layer in layers:
-                self.compare_item_list.addItem(f"PCB / {rel} / {layer}")
+            layers: list[str] = []
+            before_pcb = self.compare_before_root / rel_path
+            after_pcb = self.compare_after_root / rel_path
+            t_layer0 = time.perf_counter()
+            if before_pcb.exists() and self.cli_candidate is not None:
+                layers.extend(detect_pcb_layers(self.cli_candidate.path, before_pcb))
+            elif before_pcb.exists():
+                layers.extend(parse_pcb_layers_from_file(before_pcb))
+            if after_pcb.exists() and self.cli_candidate is not None:
+                layers.extend(detect_pcb_layers(self.cli_candidate.path, after_pcb))
+            elif after_pcb.exists():
+                layers.extend(parse_pcb_layers_from_file(after_pcb))
+            t_layer_total += time.perf_counter() - t_layer0
+            for layer in list(dict.fromkeys(layers)):
+                self.compare_targets.append({"kind": "pcb", "path": rel_path, "layer": layer})
+                self.compare_item_list.addItem(f"PCB / {rel_path} / {layer}")
 
         if self.compare_item_list.count() == 0:
             self.compare_status_label.setText(self.t("compare_image_no_targets"))
@@ -2748,13 +2945,123 @@ class MainWindow(QMainWindow):
         else:
             self.compare_status_label.setText(self.t("compare_image_status_ready"))
             self.compare_status_label.setStyleSheet("color: #2b7a0b;")
-            self.compare_item_list.setCurrentRow(0)
+        t_end = time.perf_counter()
+        print(
+            f"[perf] populate_items sch_scan={t_scan1 - t_scan0:.3f}s pcb_scan={t_scan2 - t_scan1:.3f}s "
+            f"layer_detect={t_layer_total:.3f}s total={t_end - t0:.3f}s sch={len(sch_paths)} pcb={len(pcb_paths)}",
+            flush=True,
+        )
 
-    def on_compare_item_selected(self, text: str) -> None:
-        if not text:
-            self.compare_preview_body.setText(self.t("compare_image_not_available"))
+    def on_compare_item_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self.compare_targets):
+            self._reset_compare_preview()
             return
-        self.compare_preview_body.setText(f"Selected:\n{text}")
+        target = self.compare_targets[row]
+        key = self._compare_target_key(target)
+        cached = self.compare_render_cache.get(key)
+        if cached is not None:
+            self._set_compare_images(*cached)
+            return
+
+        self.compare_status_label.setText(self.t("compare_image_rendering"))
+        self.compare_status_label.setStyleSheet("color: #666666;")
+        self._set_compare_rendering_text()
+        QApplication.processEvents()
+        try:
+            before_img, after_img, diff_img = self._render_compare_target(target)
+        except Exception as exc:
+            self.compare_status_label.setText(str(exc))
+            self.compare_status_label.setStyleSheet("color: #b00020;")
+            self._reset_compare_preview()
+            return
+        self.compare_render_cache[key] = (before_img, after_img, diff_img)
+        self._set_compare_images(before_img, after_img, diff_img)
+        self.compare_status_label.setText(self.t("compare_image_status_ready"))
+        self.compare_status_label.setStyleSheet("color: #2b7a0b;")
+
+    def _compare_target_key(self, target: dict[str, str | None]) -> str:
+        return f"{target.get('kind') or ''}|{target.get('path') or ''}|{target.get('layer') or ''}"
+
+    def _render_compare_target(self, target: dict[str, str | None]) -> tuple[QImage, QImage, QImage]:
+        if self.compare_before_root is None or self.compare_after_root is None or self.compare_render_root is None:
+            raise RuntimeError(self.t("compare_image_not_available"))
+        if self.cli_candidate is None:
+            raise RuntimeError(self.t("warning_cli_text"))
+
+        kind = target.get("kind")
+        rel_path = target.get("path")
+        layer = target.get("layer")
+        if not isinstance(kind, str) or not isinstance(rel_path, str):
+            raise RuntimeError(self.t("compare_image_not_available"))
+
+        before_src = self.compare_before_root / rel_path
+        after_src = self.compare_after_root / rel_path
+        key = re.sub(r"[^A-Za-z0-9._-]+", "_", self._compare_target_key(target))
+        cache_key = hashlib.sha1(self._compare_target_key(target).encode("utf-8")).hexdigest()
+        cache_dir = self.compare_render_root / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        before_png = cache_dir / f"{cache_key}_before.png"
+        after_png = cache_dir / f"{cache_key}_after.png"
+        diff_png = cache_dir / f"{cache_key}_diff.png"
+        if before_png.exists() and after_png.exists() and diff_png.exists():
+            cached_before = QImage(str(before_png))
+            cached_after = QImage(str(after_png))
+            cached_diff = QImage(str(diff_png))
+            if not cached_before.isNull() and not cached_after.isNull() and not cached_diff.isNull():
+                return cached_before, cached_after, cached_diff
+
+        before_svg = self._export_compare_svg(before_src if before_src.exists() else None, kind, layer, self.compare_render_root / "before" / key)
+        after_svg = self._export_compare_svg(after_src if after_src.exists() else None, kind, layer, self.compare_render_root / "after" / key)
+
+        if before_svg is None and after_svg is None:
+            raise RuntimeError(self.t("compare_image_not_available"))
+        before_img = render_svg_to_image(before_svg) if before_svg is not None else None
+        after_img = render_svg_to_image(after_svg) if after_svg is not None else None
+        if before_img is None and after_img is None:
+            raise RuntimeError(self.t("compare_image_not_available"))
+        if before_img is None:
+            before_img = QImage(after_img.width(), after_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
+            before_img.fill(Qt.white)
+        if after_img is None:
+            after_img = QImage(before_img.width(), before_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
+            after_img.fill(Qt.white)
+        before_img, after_img = normalize_image_sizes(before_img, after_img)
+        diff_img = make_pixel_diff_image(before_img, after_img)
+        before_img.save(str(before_png), "PNG")
+        after_img.save(str(after_png), "PNG")
+        diff_img.save(str(diff_png), "PNG")
+        return before_img, after_img, diff_img
+
+    def _export_compare_svg(self, source: Path | None, kind: str, layer: str | None, out_dir: Path) -> Path | None:
+        if source is None:
+            return None
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if kind == "sch":
+            svgs = export_svg_bundle_with_kicad_cli(self.cli_candidate.path, source, out_dir, "sch")  # type: ignore[union-attr]
+        elif kind == "pcb":
+            svgs = export_svg_bundle_with_kicad_cli(self.cli_candidate.path, source, out_dir, "pcb", pcb_layers=layer)  # type: ignore[union-attr]
+        else:
+            return None
+        return svgs[0] if svgs else None
+
+    def _set_compare_images(self, before_img: QImage, after_img: QImage, diff_img: QImage) -> None:
+        self.compare_diff_image_label.setPixmap(QPixmap.fromImage(diff_img))
+        self.compare_before_image_label.setPixmap(QPixmap.fromImage(before_img))
+        self.compare_after_image_label.setPixmap(QPixmap.fromImage(after_img))
+        self.compare_diff_image_label.resize(diff_img.size())
+        self.compare_before_image_label.resize(before_img.size())
+        self.compare_after_image_label.resize(after_img.size())
+        self.compare_image_tabs.setCurrentIndex(0)
+
+    def _reset_compare_preview(self) -> None:
+        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
+            label.clear()
+            label.setText(self.t("compare_image_not_available"))
+
+    def _set_compare_rendering_text(self) -> None:
+        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
+            label.clear()
+            label.setText(self.t("compare_image_rendering"))
 
     def refresh_compare_timeline(self) -> None:
         if self.compare_active_project is None:
@@ -2951,6 +3258,14 @@ class MainWindow(QMainWindow):
             self.compare_run_btn2.setText(self.t("compare_run"))
         if hasattr(self, "compare_back_btn"):
             self.compare_back_btn.setText(self.t("compare_back"))
+        if hasattr(self, "compare_items_label"):
+            self.compare_items_label.setText(self.t("compare_image_target"))
+        if hasattr(self, "compare_preview_title"):
+            self.compare_preview_title.setText(self.t("compare_image_title"))
+        if hasattr(self, "compare_image_tabs"):
+            self.compare_image_tabs.setTabText(0, self.t("compare_image_diff"))
+            self.compare_image_tabs.setTabText(1, self.t("compare_image_before"))
+            self.compare_image_tabs.setTabText(2, self.t("compare_image_after"))
         self.render_cli_status()
         self.render_git_status()
 
