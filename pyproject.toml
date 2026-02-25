@@ -1,0 +1,15 @@
+[project]
+name = "kicad-snapshot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "platformdirs>=4.9.2",
+    "pyside6>=6.10.2",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.19.0",
+]
