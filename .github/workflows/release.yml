@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z)"
+        required: true
+      publish_pypi:
+        description: "Publish package to PyPI"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Prepare release files
+        run: uv run python tools/prepare_release.py --version "${{ github.event.inputs.version }}"
+
+      - name: Commit release changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml src/kicad_snapshot/__init__.py CHANGELOG.md
+          git commit -m "chore(release): v${{ github.event.inputs.version }}"
+
+      - name: Create tag
+        run: git tag "v${{ github.event.inputs.version }}"
+
+      - name: Push commit and tag
+        run: |
+          git push origin HEAD
+          git push origin "v${{ github.event.inputs.version }}"
+
+  build_windows:
+    runs-on: windows-latest
+    needs: prepare
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Build EXE (PyInstaller onedir)
+        run: >
+          uv run pyinstaller
+          --noconfirm
+          --clean
+          --windowed
+          --onedir
+          --name kicad_snapshot
+          --paths src
+          src/kicad_snapshot/__main__.py
+
+      - name: Package ZIP and checksum
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $asset = "kicad_snapshot-$version-win-x64"
+          Compress-Archive -Path "dist/kicad_snapshot/*" -DestinationPath "$asset.zip" -Force
+          $hash = (Get-FileHash "$asset.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset.zip" | Out-File -Encoding ascii "$asset.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ github.event.inputs.version }}"
+          files: |
+            kicad_snapshot-${{ github.event.inputs.version }}-win-x64.zip
+            kicad_snapshot-${{ github.event.inputs.version }}-win-x64.sha256
+          generate_release_notes: true
+
+  publish_pypi:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: ${{ github.event.inputs.publish_pypi == 'true' }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: "v${{ github.event.inputs.version }}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1

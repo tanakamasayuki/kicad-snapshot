@@ -88,6 +88,26 @@ Entry point:
 kicad_snapshot = "kicad_snapshot.__main__:main"
 ```
 
+## Release Automation (GitHub Actions)
+
+Use workflow: `.github/workflows/release.yml`
+
+- Trigger: `workflow_dispatch`
+- Inputs:
+  - `version` (e.g. `0.0.1`)
+  - `publish_pypi` (`true`/`false`)
+
+Automated steps:
+
+1. Update versions in `pyproject.toml` and `src/kicad_snapshot/__init__.py`
+2. Update `CHANGELOG.md` by creating a new section after `## Unreleased`
+3. Commit + tag (`vX.Y.Z`)
+4. Build Windows EXE (`PyInstaller`, onedir)
+5. Create ZIP + SHA256 and attach to GitHub Release
+6. (Optional) Publish package to PyPI
+
+For PyPI publish, configure PyPI Trusted Publishing for this GitHub repository.
+
 ## Documents
 
 - [SPEC.md](SPEC.md) / [SPEC.ja.md](SPEC.ja.md): product specification

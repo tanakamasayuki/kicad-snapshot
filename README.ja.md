@@ -88,6 +88,26 @@ uv run kicad_snapshot
 kicad_snapshot = "kicad_snapshot.__main__:main"
 ```
 
+## リリース自動化（GitHub Actions）
+
+ワークフロー: `.github/workflows/release.yml`
+
+- 起動方法: `workflow_dispatch`
+- 入力:
+  - `version`（例: `0.0.1`）
+  - `publish_pypi`（`true`/`false`）
+
+自動化される処理:
+
+1. `pyproject.toml` と `src/kicad_snapshot/__init__.py` のバージョン更新
+2. `CHANGELOG.md` で `## Unreleased` の直下に新バージョン見出しを追加
+3. コミット + タグ作成（`vX.Y.Z`）
+4. Windows EXE のビルド（PyInstaller, onedir）
+5. 配布用ZIP + SHA256生成とGitHub Release添付
+6. （任意）PyPI公開
+
+PyPI公開を使う場合は、このリポジトリに対して PyPI Trusted Publishing の設定が必要です。
+
 ## ドキュメント
 
 - [SPEC.md](SPEC.md) / [SPEC.ja.md](SPEC.ja.md): プロダクト仕様
