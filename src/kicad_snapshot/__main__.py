@@ -82,7 +82,7 @@ TRANSLATIONS = {
         "status_not_detected": "Status: kicad-cli not detected. Please set path.",
         "status_ok": "Status: OK (version {version})",
         "git_path": "git path (optional)",
-        "git_refresh": "Refresh Git",
+        "git_refresh": "Auto Detect Git",
         "git_checking": "Git: Checking...",
         "git_not_detected": "Git: not detected (optional)",
         "git_check_failed": "Git: path found, but version check failed (optional)",
@@ -194,7 +194,7 @@ TRANSLATIONS = {
         "status_not_detected": "状態: kicad-cli が未検出です。パスを設定してください。",
         "status_ok": "状態: OK (バージョン {version})",
         "git_path": "git パス（任意）",
-        "git_refresh": "Git更新",
+        "git_refresh": "Git自動検出",
         "git_checking": "Git: 確認中...",
         "git_not_detected": "Git: 未検出（任意）",
         "git_check_failed": "Git: パスはあるがバージョン確認失敗（任意）",
@@ -585,6 +585,85 @@ def discover_kicad_cli_candidates(manual_path: str | None) -> list[CliCandidate]
         if candidate:
             candidates.append(candidate)
 
+    return candidates
+
+
+def probe_git(path: Path) -> CliCandidate | None:
+    result: subprocess.CompletedProcess[str] | None = None
+    for timeout_sec in (5, 10):
+        try:
+            result = run_subprocess(
+                [str(path), "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            break
+        except Exception:
+            continue
+    if result is None:
+        return None
+
+    output = (result.stdout or "").strip() or (result.stderr or "").strip()
+    version, version_text = parse_version_text(output)
+    if result.returncode != 0 or version is None:
+        return None
+    return CliCandidate(path=path, version=version, version_text=version_text)
+
+
+def discover_git_candidates() -> list[CliCandidate]:
+    checked: set[Path] = set()
+    candidates: list[CliCandidate] = []
+    for p in iter_git_candidate_paths():
+        path = p.expanduser()
+        if not path.exists() or path.is_dir():
+            continue
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        if resolved in checked:
+            continue
+        checked.add(resolved)
+        cand = probe_git(resolved)
+        if cand:
+            candidates.append(cand)
+    return candidates
+
+
+def iter_git_candidate_paths() -> Iterable[Path]:
+    for p in likely_git_paths():
+        yield p
+    from_path = shutil.which("git")
+    if from_path:
+        yield Path(from_path)
+
+
+def likely_git_paths() -> list[Path]:
+    candidates: list[Path] = []
+    if sys.platform.startswith("win"):
+        roots = [
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramFiles(x86)"),
+            os.environ.get("LOCALAPPDATA"),
+            str(Path.home() / "AppData" / "Local"),
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+        ]
+        for root in roots:
+            if not root:
+                continue
+            root_path = Path(root)
+            if not root_path.exists():
+                continue
+            candidates.extend(root_path.glob("Git/cmd/git.exe"))
+            candidates.extend(root_path.glob("Git/bin/git.exe"))
+            candidates.extend(root_path.glob("Programs/Git/cmd/git.exe"))
+            candidates.extend(root_path.glob("Programs/Git/bin/git.exe"))
+    else:
+        for p in ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git", "/opt/local/bin/git"]:
+            candidates.append(Path(p))
     return candidates
 
 
@@ -2679,6 +2758,7 @@ class MainWindow(QMainWindow):
         zoom_row.addStretch(1)
         right_layout.addLayout(zoom_row)
         self.compare_image_tabs = QTabWidget()
+        self.compare_image_tabs.currentChanged.connect(self.on_compare_image_tab_changed)
         self.compare_diff_image_label = QLabel()
         self.compare_before_image_label = QLabel()
         self.compare_after_image_label = QLabel()
@@ -2717,6 +2797,8 @@ class MainWindow(QMainWindow):
         self.compare_zoom_mode = "fit"
         self.compare_zoom_scale = 1.0
         self._compare_syncing_scroll = False
+        self._compare_scroll_ratio_x = 0.0
+        self._compare_scroll_ratio_y = 0.0
         self.compare_before_root: Path | None = None
         self.compare_after_root: Path | None = None
         self.compare_render_root: Path | None = None
@@ -3287,11 +3369,15 @@ class MainWindow(QMainWindow):
         source_bar = self.sender()
         if source_bar is None:
             return
+        source_max = source_bar.maximum()
+        ratio = 0.0 if source_max <= 0 else source_bar.value() / source_max
+        source_is_vertical = source_bar.orientation() == Qt.Vertical
+        if source_is_vertical:
+            self._compare_scroll_ratio_y = ratio
+        else:
+            self._compare_scroll_ratio_x = ratio
         self._compare_syncing_scroll = True
         try:
-            source_max = source_bar.maximum()
-            ratio = 0.0 if source_max <= 0 else source_bar.value() / source_max
-            source_is_vertical = source_bar.orientation() == Qt.Vertical
             for scroll in self.compare_image_scrolls.values():
                 target_bar = scroll.verticalScrollBar() if source_is_vertical else scroll.horizontalScrollBar()
                 if target_bar is source_bar:
@@ -3300,6 +3386,10 @@ class MainWindow(QMainWindow):
                 target_bar.setValue(int(round(ratio * tmax)) if tmax > 0 else 0)
         finally:
             self._compare_syncing_scroll = False
+
+    def on_compare_image_tab_changed(self, _: int) -> None:
+        # Hidden tab scroll ranges may be finalized after tab switch.
+        QTimer.singleShot(0, self._apply_compare_scroll_ratios)
 
     def on_compare_zoom_fit(self) -> None:
         self.compare_zoom_mode = "fit"
@@ -3320,6 +3410,22 @@ class MainWindow(QMainWindow):
         self._set_compare_image_for_key(self.compare_before_image_label, self.compare_before_image_raw, fit_scale)
         self._set_compare_image_for_key(self.compare_after_image_label, self.compare_after_image_raw, fit_scale)
         self._set_compare_image_for_key(self.compare_diff_image_label, self.compare_diff_image_raw, fit_scale)
+        QTimer.singleShot(0, self._apply_compare_scroll_ratios)
+
+    def _apply_compare_scroll_ratios(self) -> None:
+        if self._compare_syncing_scroll:
+            return
+        self._compare_syncing_scroll = True
+        try:
+            for scroll in self.compare_image_scrolls.values():
+                hbar = scroll.horizontalScrollBar()
+                vbar = scroll.verticalScrollBar()
+                hmax = hbar.maximum()
+                vmax = vbar.maximum()
+                hbar.setValue(int(round(self._compare_scroll_ratio_x * hmax)) if hmax > 0 else 0)
+                vbar.setValue(int(round(self._compare_scroll_ratio_y * vmax)) if vmax > 0 else 0)
+        finally:
+            self._compare_syncing_scroll = False
 
     def _compute_compare_fit_scale(self) -> float:
         images = [img for img in [self.compare_before_image_raw, self.compare_after_image_raw, self.compare_diff_image_raw] if img is not None]
@@ -3712,44 +3818,20 @@ class MainWindow(QMainWindow):
         self.update_next_state()
 
     def detect_git(self) -> None:
-        git_path = shutil.which("git")
-        if not git_path:
+        candidates = discover_git_candidates()
+        if not candidates:
             self.git_path = None
             self.git_path_input.setText("")
             self.set_git_status("git_not_detected", "warn")
             return
 
-        self.git_path = git_path
-        self.git_path_input.setText(git_path)
-        result: subprocess.CompletedProcess[str] | None = None
-        for cmd in ([git_path, "--version"], ["git", "--version"]):
-            for timeout_sec in (5, 10):
-                try:
-                    result = run_subprocess(
-                        cmd,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout_sec,
-                    )
-                    break
-                except Exception:
-                    continue
-            if result is not None:
-                break
-        if result is None:
-            self.set_git_status("git_check_failed", "warn")
-            return
-
-        if result.returncode == 0:
-            version_text = result.stdout.strip() or result.stderr.strip()
-            if version_text:
-                self.set_git_status("git_ok", "ok", version=version_text)
-            else:
-                self.set_git_status("git_ok_plain", "ok")
-            return
-
-        self.set_git_status("git_check_failed", "warn")
+        best = max(candidates, key=lambda c: c.version)
+        self.git_path = str(best.path)
+        self.git_path_input.setText(self.git_path)
+        if best.version_text:
+            self.set_git_status("git_ok", "ok", version=best.version_text)
+        else:
+            self.set_git_status("git_ok_plain", "ok")
 
     def open_project(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
