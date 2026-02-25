@@ -59,20 +59,17 @@ that runs on Windows / macOS / Linux.
 ## 5. Project Structure
 
 ```
-kicad_snapshot/
+kicad-snapshot/
 ├── pyproject.toml
 ├── README.md
 ├── src/
 │   └── kicad_snapshot/
 │       ├── __init__.py
-│       ├── __main__.py
-│       ├── gui.py
-│       ├── core/
-│       ├── resources/
-│       └── config.py
-└── .github/
-    └── workflows/
-        └── build.yml
+│       └── __main__.py
+├── SPEC.md
+├── SPEC.ja.md
+├── DEV_SPEC.md
+└── DEV_SPEC.ja.md
 ```
 
 ---
@@ -92,6 +89,12 @@ kicad_snapshot = "kicad_snapshot.__main__:main"
 
 ```
 kicad_snapshot
+```
+
+#### During development (uv)
+
+```
+uv run kicad_snapshot
 ```
 
 #### Windows exe
