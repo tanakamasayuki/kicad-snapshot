@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+
+## 1.0.5
 - (EN) Updated snapshot backup target rules to hybrid include/exclude: include `*.kicad_*` and `*-lib-table` (including `.kicad_prl`), while excluding common dev/temp artifacts.
 - (JA) スナップショットのバックアップ対象ルールを include/exclude のハイブリッド方式に更新: `*.kicad_*` と `*-lib-table`（`.kicad_prl` 含む）を対象にし、開発・一時ファイルを除外。
 
