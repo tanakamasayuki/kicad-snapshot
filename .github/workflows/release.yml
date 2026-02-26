@@ -62,6 +62,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: "v${{ github.event.inputs.version }}"
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -99,6 +100,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.event.inputs.version }}"
+          $currentTag = "v$version"
           $lines = Get-Content CHANGELOG.md
           $start = -1
           for ($i = 0; $i -lt $lines.Length; $i++) {
@@ -118,10 +120,20 @@ jobs:
             }
           }
           $section = $lines[$start..($end - 1)] -join "`n"
-          $body = @"
-$section
-`nRepository: https://github.com/tanakamasayuki/kicad-snapshot
-"@
+          $body = $section + "`n`nRepository: https://github.com/tanakamasayuki/kicad-snapshot"
+          $tags = git tag --list "v*" --sort=v:refname
+          $previousTag = ""
+          for ($i = 0; $i -lt $tags.Length; $i++) {
+            if ($tags[$i] -eq $currentTag) {
+              if ($i -gt 0) {
+                $previousTag = $tags[$i - 1]
+              }
+              break
+            }
+          }
+          if ($previousTag -ne "") {
+            $body += "`n`nFull Changelog: https://github.com/tanakamasayuki/kicad-snapshot/compare/$previousTag...$currentTag"
+          }
           $body | Out-File -Encoding utf8 release_body.md
 
       - name: Create GitHub Release
