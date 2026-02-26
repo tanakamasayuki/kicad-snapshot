@@ -3289,6 +3289,8 @@ class MainWindow(QMainWindow):
         return page
 
     def show_startup_page(self) -> None:
+        if self.page_stack.currentWidget() is self.compare_page:
+            self._cleanup_compare_temp_dirs()
         self.page_stack.setCurrentWidget(self.startup_page)
 
     def _wrap_compare_image_label(self, key: str, label: QLabel) -> QWidget:
@@ -3323,6 +3325,7 @@ class MainWindow(QMainWindow):
         if self.snapshot_active_project is None:
             self.show_startup_page()
             return
+        self._cleanup_compare_temp_dirs()
         self.snapshot_project_label.setText(self.t("snapshot_selected_project", project=str(self.snapshot_active_project)))
         self.refresh_snapshot_timeline()
         self.page_stack.setCurrentWidget(self.snapshot_page)
@@ -3523,8 +3526,9 @@ class MainWindow(QMainWindow):
             self.compare_status_refresh_timer.stop()
         self.compare_precache_active = False
         self._compare_precache_stop.set()
+        # Wait until background render worker exits to avoid temp-dir races on reopen.
         if self._compare_precache_thread is not None and self._compare_precache_thread.is_alive():
-            self._compare_precache_thread.join(timeout=0.2)
+            self._compare_precache_thread.join()
         self._compare_precache_thread = None
         for obj in [self._compare_tmp_before_obj, self._compare_tmp_after_obj, self._compare_tmp_render_obj]:
             if obj is not None:
@@ -3868,6 +3872,8 @@ class MainWindow(QMainWindow):
                     with self._compare_status_lock:
                         self.compare_target_status[key] = "error"
                     continue
+                if self._compare_precache_stop.is_set():
+                    break
         finally:
             self.compare_precache_active = False
 
