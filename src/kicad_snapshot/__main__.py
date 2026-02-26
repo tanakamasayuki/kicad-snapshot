@@ -728,10 +728,6 @@ class SettingsStore:
         if isinstance(manual_cli, str):
             lines.append(f'manual_cli_path = {self._quote(manual_cli)}')
 
-        output_dir = data.get("output_dir")
-        if isinstance(output_dir, str):
-            lines.append(f'output_dir = {self._quote(output_dir)}')
-
         language = data.get("language")
         if isinstance(language, str):
             lines.append(f'language = {self._quote(language)}')
@@ -3210,8 +3206,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(scroll, 1)
         return wrap
 
-    def show_snapshot_page(self, project: str, output_dir: str) -> None:
-        del output_dir
+    def show_snapshot_page(self, project: str) -> None:
         self.snapshot_active_project = Path(project)
         self.snapshot_project_label.setText(self.t("snapshot_selected_project", project=project))
         mode = self.settings.get("compare_filter")
@@ -3255,7 +3250,7 @@ class MainWindow(QMainWindow):
         self._compare_pending_from_id = from_id
         self._compare_pending_to_id = to_id
         # Show compare page immediately, then run heavy preparation.
-        self.show_compare_page(project=str(self.snapshot_active_project), output_dir="")
+        self.show_compare_page(project=str(self.snapshot_active_project))
         QTimer.singleShot(0, self._prepare_compare_after_show)
 
     def _load_snapshot_source_map(self, source_id: str) -> dict[str, bytes]:
@@ -3351,13 +3346,11 @@ class MainWindow(QMainWindow):
     def show_compare_page(
         self,
         project: str,
-        output_dir: str,
         from_id: str | None = None,
         to_id: str | None = None,
         before_map: dict[str, bytes] | None = None,
         after_map: dict[str, bytes] | None = None,
     ) -> None:
-        del output_dir
         self.compare_active_project = Path(project)
         self.compare_from_id = from_id
         self.compare_to_id = to_id
@@ -4414,11 +4407,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        default_output = str(Path(project).resolve().parent / "diff_report")
-        self.settings["output_dir"] = default_output
-        self.save_settings()
-
-        self.show_snapshot_page(project=project, output_dir=default_output)
+        self.show_snapshot_page(project=project)
 
 
 def main() -> None:

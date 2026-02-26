@@ -11,6 +11,8 @@
 - (JA) SVGプレビュー描画を改善: フォールバック時も縦横比を維持し、ラスタライズ時の既定サイズを拡大（SVG既定サイズからの拡大、現在は2倍）。
 - (EN) Updated project list interaction: double-click now proceeds to Snapshot/Compare when the Continue button is enabled.
 - (JA) プロジェクト一覧の操作を更新: 「続行」ボタンが有効な場合、ダブルクリックでスナップショット/比較画面へ進むように変更。
+- (EN) Removed unused `output_dir` setting and related dead parameters from the code/config serialization.
+- (JA) 未使用だった `output_dir` 設定項目と関連する不要な引数・シリアライズ処理を削除。
 
 ## 0.2.0
 - (EN) Initial release
