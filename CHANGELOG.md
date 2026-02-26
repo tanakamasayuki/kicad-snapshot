@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+
+## 1.0.0
 - (EN) Added startup version utilities: check latest release from GitHub and open the project web page.
 - (JA) 起動画面にバージョン関連機能を追加: GitHubから最新リリース確認とWebページを開くボタン。
 - (EN) Expanded translation dictionaries for Chinese/French/German with explicit UI strings (reduced fallback-to-English usage).
