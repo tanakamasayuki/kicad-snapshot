@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+
+## 1.0.3
 - (EN) Added alternate CLI script name `kicad-snapshot` in addition to `kicad_snapshot`.
 - (JA) CLIスクリプト名として既存の `kicad_snapshot` に加え、`kicad-snapshot` の別名を追加。
 
