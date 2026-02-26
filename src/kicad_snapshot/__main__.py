@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -74,6 +75,15 @@ DEFAULT_TIMELINE_LIMIT = 50
 BACKUP_DIR_NAME = "snapshot_backups"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/tanakamasayuki/kicad-snapshot/releases/latest"
 SUPPORTED_LANGUAGES = ("en", "ja", "zh", "fr", "de")
+ENABLE_PERF_LOG = True
+COMPARE_RENDER_SCALE_OPTIONS = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0)
+DEFAULT_COMPARE_RENDER_SCALE = 2.0
+MAX_RENDER_DIMENSION = 12000
+
+
+def perf_log(message: str) -> None:
+    if ENABLE_PERF_LOG:
+        print(f"[perf] {message}", flush=True)
 
 LANGUAGE_LABELS = {
     "en": "English",
@@ -192,6 +202,7 @@ TRANSLATIONS = {
         "compare_image_zoom_out": "Zoom Out",
         "compare_image_zoom_in": "Zoom In",
         "compare_image_zoom_fit": "Fit",
+        "compare_image_render_scale": "Render Scale",
         "compare_item_status_pending": "Pending",
         "compare_item_status_rendering": "Rendering",
         "compare_item_status_diff": "Diff",
@@ -313,6 +324,7 @@ TRANSLATIONS = {
         "compare_image_zoom_out": "縮小",
         "compare_image_zoom_in": "拡大",
         "compare_image_zoom_fit": "フィット",
+        "compare_image_render_scale": "レンダリング倍率",
         "compare_item_status_pending": "未完了",
         "compare_item_status_rendering": "レンダリング中",
         "compare_item_status_diff": "差分あり",
@@ -753,6 +765,10 @@ class SettingsStore:
         compare_timeline_limit = data.get("compare_timeline_limit")
         if isinstance(compare_timeline_limit, int):
             lines.append(f"compare_timeline_limit = {compare_timeline_limit}")
+
+        compare_render_scale = data.get("compare_render_scale")
+        if isinstance(compare_render_scale, (int, float)):
+            lines.append(f"compare_render_scale = {float(compare_render_scale):g}")
 
         window_width = data.get("window_width")
         if isinstance(window_width, int):
@@ -1228,7 +1244,8 @@ def export_svg_bundle_with_kicad_cli(
     raise RuntimeError(last_err or "kicad-cli export failed")
 
 
-def render_svg_to_image(svg_path: Path) -> QImage:
+def render_svg_to_image(svg_path: Path, scale: float = DEFAULT_COMPARE_RENDER_SCALE) -> QImage:
+    t0 = time.perf_counter()
     renderer = QSvgRenderer(str(svg_path))
     if not renderer.isValid():
         raise RuntimeError(f"Invalid SVG: {svg_path}")
@@ -1259,15 +1276,21 @@ def render_svg_to_image(svg_path: Path) -> QImage:
             else:
                 base_h = base_w / 1.4
 
-    scale = 2
-    width = max(1, min(int(round(base_w * scale)), 3000))
-    height = max(1, min(int(round(base_h * scale)), 3000))
+    applied_scale = max(0.5, min(float(scale), 6.0))
+    width = max(1, min(int(round(base_w * applied_scale)), MAX_RENDER_DIMENSION))
+    height = max(1, min(int(round(base_h * applied_scale)), MAX_RENDER_DIMENSION))
 
     image = QImage(width, height, QImage.Format_ARGB32)
     image.fill(Qt.white)
     painter = QPainter(image)
     renderer.render(painter)
     painter.end()
+    elapsed = time.perf_counter() - t0
+    perf_log(
+        "render_svg_to_image "
+        f"path={svg_path.name} base={int(round(base_w))}x{int(round(base_h))} "
+        f"scale={applied_scale:g} out={width}x{height} elapsed={elapsed:.3f}s"
+    )
     return image
 
 
@@ -2782,6 +2805,7 @@ class MainWindow(QMainWindow):
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
         self.language = self.resolve_initial_language()
+        self.compare_render_scale = self.resolve_compare_render_scale()
 
         self.cli_candidate: CliCandidate | None = None
         self.git_path: str | None = None
@@ -3129,12 +3153,23 @@ class MainWindow(QMainWindow):
         self.compare_zoom_out_btn = QPushButton(self.t("compare_image_zoom_out"))
         self.compare_zoom_in_btn = QPushButton(self.t("compare_image_zoom_in"))
         self.compare_zoom_fit_btn = QPushButton(self.t("compare_image_zoom_fit"))
+        self.compare_render_scale_label = QLabel(self.t("compare_image_render_scale"))
+        self.compare_render_scale_combo = QComboBox()
+        for scale in COMPARE_RENDER_SCALE_OPTIONS:
+            self.compare_render_scale_combo.addItem(f"{scale:g}x", scale)
+        idx = self.compare_render_scale_combo.findData(self.compare_render_scale)
+        if idx >= 0:
+            self.compare_render_scale_combo.setCurrentIndex(idx)
+        self.compare_render_scale_combo.currentIndexChanged.connect(self.on_compare_render_scale_changed)
         self.compare_zoom_out_btn.clicked.connect(self.on_compare_zoom_out)
         self.compare_zoom_in_btn.clicked.connect(self.on_compare_zoom_in)
         self.compare_zoom_fit_btn.clicked.connect(self.on_compare_zoom_fit)
         zoom_row.addWidget(self.compare_zoom_out_btn)
         zoom_row.addWidget(self.compare_zoom_in_btn)
         zoom_row.addWidget(self.compare_zoom_fit_btn)
+        zoom_row.addSpacing(12)
+        zoom_row.addWidget(self.compare_render_scale_label)
+        zoom_row.addWidget(self.compare_render_scale_combo)
         zoom_row.addStretch(1)
         right_layout.addLayout(zoom_row)
         self.compare_image_tabs = QTabWidget()
@@ -3381,17 +3416,31 @@ class MainWindow(QMainWindow):
             return
         if self._compare_pending_from_id is None or self._compare_pending_to_id is None:
             return
+        t0 = time.perf_counter()
         from_id = self._compare_pending_from_id
         to_id = self._compare_pending_to_id
         try:
+            t_load0 = time.perf_counter()
             before_map = self._load_snapshot_source_map(from_id)
             after_map = self._load_snapshot_source_map(to_id)
+            perf_log(
+                "_prepare_compare_after_show/load_maps "
+                f"before_files={len(before_map)} after_files={len(after_map)} "
+                f"elapsed={time.perf_counter() - t_load0:.3f}s"
+            )
             self.compare_from_id = from_id
             self.compare_to_id = to_id
             self.compare_before_map = before_map
             self.compare_after_map = after_map
+            t_tmp0 = time.perf_counter()
             self._prepare_compare_temp_dirs()
+            perf_log(f"_prepare_compare_after_show/prepare_tmp elapsed={time.perf_counter() - t_tmp0:.3f}s")
+            t_pop0 = time.perf_counter()
             self.populate_compare_item_list()
+            perf_log(
+                "_prepare_compare_after_show/populate_items "
+                f"targets={len(self.compare_targets)} elapsed={time.perf_counter() - t_pop0:.3f}s"
+            )
             if self.compare_item_list.count() > 0:
                 self.compare_item_list.setCurrentRow(0)
                 self._start_compare_precache()
@@ -3399,6 +3448,7 @@ class MainWindow(QMainWindow):
             self.compare_status_label.setText(str(exc))
             self.compare_status_label.setStyleSheet("color: #b00020;")
         finally:
+            perf_log(f"_prepare_compare_after_show/total elapsed={time.perf_counter() - t0:.3f}s")
             self._compare_pending_from_id = None
             self._compare_pending_to_id = None
 
@@ -3509,7 +3559,8 @@ class MainWindow(QMainWindow):
             return
         target = self.compare_targets[row]
         key = self._compare_target_key(target)
-        cached = self.compare_render_cache.get(key)
+        render_cache_key = self._compare_render_cache_key(target)
+        cached = self.compare_render_cache.get(render_cache_key)
         if cached is not None:
             self._set_compare_images(*cached)
             self.compare_status_label.setText(self.t("compare_image_status_ready"))
@@ -3533,7 +3584,7 @@ class MainWindow(QMainWindow):
             self._reset_compare_preview()
             self._refresh_compare_item_list_labels()
             return
-        self.compare_render_cache[key] = (before_img, after_img, diff_img)
+        self.compare_render_cache[render_cache_key] = (before_img, after_img, diff_img)
         self._set_compare_images(before_img, after_img, diff_img)
         self.compare_status_label.setText(self.t("compare_image_status_ready"))
         self.compare_status_label.setStyleSheet("color: #2b7a0b;")
@@ -3550,10 +3601,13 @@ class MainWindow(QMainWindow):
             raise RuntimeError(self.t("compare_image_not_available"))
         return before_img, after_img, diff_img
 
+    def _compare_render_cache_key(self, target: dict[str, str | None]) -> str:
+        return f"{self._compare_target_key(target)}|scale={self.compare_render_scale:g}"
+
     def _cache_paths_for_target(self, target: dict[str, str | None]) -> tuple[Path, Path, Path]:
         if self.compare_render_root is None:
             raise RuntimeError(self.t("compare_image_not_available"))
-        cache_key = hashlib.sha1(self._compare_target_key(target).encode("utf-8")).hexdigest()
+        cache_key = hashlib.sha1(self._compare_render_cache_key(target).encode("utf-8")).hexdigest()
         cache_dir = self.compare_render_root / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         return (
@@ -3563,6 +3617,7 @@ class MainWindow(QMainWindow):
         )
 
     def _ensure_compare_target_cache(self, target: dict[str, str | None]) -> tuple[Path, Path, Path]:
+        total_t0 = time.perf_counter()
         if self.compare_before_root is None or self.compare_after_root is None or self.compare_render_root is None:
             raise RuntimeError(self.t("compare_image_not_available"))
         if self.cli_candidate is None:
@@ -3575,6 +3630,8 @@ class MainWindow(QMainWindow):
             raise RuntimeError(self.t("compare_image_not_available"))
 
         before_png, after_png, diff_png = self._cache_paths_for_target(target)
+        target_key = self._compare_target_key(target)
+        target_desc = f"{kind}|{rel_path}|{layer or 'board'}"
         if before_png.exists() and after_png.exists() and diff_png.exists():
             try:
                 b = QImage(str(before_png))
@@ -3583,7 +3640,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 status = "error"
             with self._compare_status_lock:
-                self.compare_target_status[self._compare_target_key(target)] = status
+                self.compare_target_status[target_key] = status
+            perf_log(
+                "_ensure_compare_target_cache/cache_hit "
+                f"target={target_desc} status={status} elapsed={time.perf_counter() - total_t0:.3f}s"
+            )
             return before_png, after_png, diff_png
 
         with self._compare_render_lock:
@@ -3595,12 +3656,17 @@ class MainWindow(QMainWindow):
                 except Exception:
                     status = "error"
                 with self._compare_status_lock:
-                    self.compare_target_status[self._compare_target_key(target)] = status
+                    self.compare_target_status[target_key] = status
+                perf_log(
+                    "_ensure_compare_target_cache/cache_hit_after_lock "
+                    f"target={target_desc} status={status} elapsed={time.perf_counter() - total_t0:.3f}s"
+                )
                 return before_png, after_png, diff_png
 
             before_src = self.compare_before_root / rel_path
             after_src = self.compare_after_root / rel_path
             key = re.sub(r"[^A-Za-z0-9._-]+", "_", self._compare_target_key(target))
+            t_export0 = time.perf_counter()
             before_svg = self._export_compare_svg(
                 before_src if before_src.exists() else None,
                 kind,
@@ -3613,11 +3679,14 @@ class MainWindow(QMainWindow):
                 layer,
                 self.compare_render_root / "after" / key,
             )
+            t_export = time.perf_counter() - t_export0
 
             if before_svg is None and after_svg is None:
                 raise RuntimeError(self.t("compare_image_not_available"))
-            before_img = render_svg_to_image(before_svg) if before_svg is not None else None
-            after_img = render_svg_to_image(after_svg) if after_svg is not None else None
+            t_raster0 = time.perf_counter()
+            before_img = render_svg_to_image(before_svg, self.compare_render_scale) if before_svg is not None else None
+            after_img = render_svg_to_image(after_svg, self.compare_render_scale) if after_svg is not None else None
+            t_raster = time.perf_counter() - t_raster0
             if before_img is None and after_img is None:
                 raise RuntimeError(self.t("compare_image_not_available"))
             if before_img is None:
@@ -3626,14 +3695,24 @@ class MainWindow(QMainWindow):
             if after_img is None:
                 after_img = QImage(before_img.width(), before_img.height(), QImage.Format_ARGB32)  # type: ignore[union-attr]
                 after_img.fill(Qt.white)
+            t_diff0 = time.perf_counter()
             before_img, after_img = normalize_image_sizes(before_img, after_img)
             has_diff = images_different(before_img, after_img)
             diff_img = make_pixel_diff_image(before_img, after_img)
+            t_diff = time.perf_counter() - t_diff0
+            t_save0 = time.perf_counter()
             before_img.save(str(before_png), "PNG")
             after_img.save(str(after_png), "PNG")
             diff_img.save(str(diff_png), "PNG")
+            t_save = time.perf_counter() - t_save0
             with self._compare_status_lock:
-                self.compare_target_status[self._compare_target_key(target)] = "diff" if has_diff else "same"
+                self.compare_target_status[target_key] = "diff" if has_diff else "same"
+            perf_log(
+                "_ensure_compare_target_cache/render "
+                f"target={target_desc} export={t_export:.3f}s raster={t_raster:.3f}s "
+                f"diff={t_diff:.3f}s save={t_save:.3f}s total={time.perf_counter() - total_t0:.3f}s "
+                f"size={before_img.width()}x{before_img.height()} scale={self.compare_render_scale:g} diff={has_diff}"
+            )
         return before_png, after_png, diff_png
 
     def _export_compare_svg(self, source: Path | None, kind: str, layer: str | None, out_dir: Path) -> Path | None:
@@ -3782,6 +3861,25 @@ class MainWindow(QMainWindow):
         self.compare_zoom_mode = "manual"
         self.compare_zoom_scale = max(self.compare_zoom_scale / 1.25, 0.1)
         self._render_compare_image_labels()
+
+    def on_compare_render_scale_changed(self, *_args) -> None:
+        value = self.compare_render_scale_combo.currentData()
+        if not isinstance(value, (int, float)):
+            return
+        new_scale = float(value)
+        if abs(new_scale - self.compare_render_scale) < 1e-9:
+            return
+        self.compare_render_scale = new_scale
+        self.settings["compare_render_scale"] = new_scale
+        self.save_settings()
+        self.compare_render_cache.clear()
+        self._compare_precache_stop.set()
+        self.compare_precache_active = False
+        self._set_compare_rendering_text()
+        row = self.compare_item_list.currentRow()
+        if row >= 0:
+            self.on_compare_item_selected(row)
+        self._start_compare_precache()
 
     def _current_compare_image_key(self) -> str:
         idx = self.compare_image_tabs.currentIndex()
@@ -3983,6 +4081,17 @@ class MainWindow(QMainWindow):
             return 500
         return value
 
+    def resolve_compare_render_scale(self) -> float:
+        raw = self.settings.get("compare_render_scale")
+        if isinstance(raw, (int, float)):
+            value = float(raw)
+        else:
+            value = DEFAULT_COMPARE_RENDER_SCALE
+        for opt in COMPARE_RENDER_SCALE_OPTIONS:
+            if abs(value - opt) < 1e-6:
+                return opt
+        return DEFAULT_COMPARE_RENDER_SCALE
+
     def t(self, key: str, **kwargs: str) -> str:
         table = TRANSLATIONS.get(self.language, TRANSLATIONS["en"])
         text = table.get(key, TRANSLATIONS["en"].get(key, key))
@@ -4087,6 +4196,8 @@ class MainWindow(QMainWindow):
             self.compare_zoom_in_btn.setText(self.t("compare_image_zoom_in"))
         if hasattr(self, "compare_zoom_fit_btn"):
             self.compare_zoom_fit_btn.setText(self.t("compare_image_zoom_fit"))
+        if hasattr(self, "compare_render_scale_label"):
+            self.compare_render_scale_label.setText(self.t("compare_image_render_scale"))
         if hasattr(self, "compare_image_tabs"):
             self.compare_image_tabs.setTabText(0, self.t("compare_image_diff"))
             self.compare_image_tabs.setTabText(1, self.t("compare_image_before"))
