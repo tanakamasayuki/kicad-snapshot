@@ -95,14 +95,44 @@ jobs:
           $hash = (Get-FileHash "$asset.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset.zip" | Out-File -Encoding ascii "$asset.sha256"
 
+      - name: Build release body from CHANGELOG
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $lines = Get-Content CHANGELOG.md
+          $start = -1
+          for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -match "^##\s+$([regex]::Escape($version))\s*$") {
+              $start = $i
+              break
+            }
+          }
+          if ($start -lt 0) {
+            throw "Version section ## $version not found in CHANGELOG.md"
+          }
+          $end = $lines.Length
+          for ($j = $start + 1; $j -lt $lines.Length; $j++) {
+            if ($lines[$j] -match "^##\s+") {
+              $end = $j
+              break
+            }
+          }
+          $section = $lines[$start..($end - 1)] -join "`n"
+          $body = @"
+$section
+`nRepository: https://github.com/tanakamasayuki/kicad-snapshot
+"@
+          $body | Out-File -Encoding utf8 release_body.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v${{ github.event.inputs.version }}"
+          body_path: release_body.md
           files: |
             kicad_snapshot-${{ github.event.inputs.version }}-win-x64.zip
             kicad_snapshot-${{ github.event.inputs.version }}-win-x64.sha256
-          generate_release_notes: true
+          generate_release_notes: false
 
   publish_pypi:
     runs-on: ubuntu-latest
