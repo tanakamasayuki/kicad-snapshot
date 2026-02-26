@@ -111,6 +111,13 @@ uv sync --dev
 uv run kicad_snapshot
 ```
 
+Windows EXEを手動ビルドする場合（PyInstaller, onedir）:
+
+```bash
+uv sync --dev
+uv run pyinstaller --noconfirm --clean --windowed --onedir --name kicad_snapshot --paths src src/kicad_snapshot/__main__.py
+```
+
 エントリポイント:
 
 ```toml
