@@ -203,6 +203,7 @@ TRANSLATIONS = {
         "compare_image_before": "Before Image",
         "compare_image_after": "After Image",
         "compare_image_diff": "Diff Image",
+        "compare_image_auto": "Auto",
         "compare_image_not_available": "Image diff is available for .kicad_sch/.kicad_pcb content.",
         "compare_image_zoom_out": "Zoom Out",
         "compare_image_zoom_in": "Zoom In",
@@ -325,6 +326,7 @@ TRANSLATIONS = {
         "compare_image_before": "Before 画像",
         "compare_image_after": "After 画像",
         "compare_image_diff": "差分画像",
+        "compare_image_auto": "自動切替",
         "compare_image_not_available": ".kicad_sch/.kicad_pcb が無い場合は画像差分を生成できません。",
         "compare_image_zoom_out": "縮小",
         "compare_image_zoom_in": "拡大",
@@ -3208,14 +3210,20 @@ class MainWindow(QMainWindow):
         zoom_row.addWidget(self.compare_render_scale_combo)
         zoom_row.addStretch(1)
         right_layout.addLayout(zoom_row)
+        self.compare_auto_cycle_index = 0
+        self.compare_auto_cycle_timer = QTimer(self)
+        self.compare_auto_cycle_timer.setInterval(800)
+        self.compare_auto_cycle_timer.timeout.connect(self._advance_compare_auto_image)
         self.compare_image_tabs = QTabWidget()
         self.compare_image_tabs.currentChanged.connect(self.on_compare_image_tab_changed)
         self.compare_diff_image_label = QLabel()
         self.compare_before_image_label = QLabel()
         self.compare_after_image_label = QLabel()
-        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
+        self.compare_auto_image_label = QLabel()
+        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label, self.compare_auto_image_label]:
             label.setAlignment(Qt.AlignCenter)
             label.setText(self.t("compare_image_not_available"))
+        self.compare_image_tabs.addTab(self._wrap_compare_image_label("auto", self.compare_auto_image_label), self.t("compare_image_auto"))
         self.compare_image_tabs.addTab(self._wrap_compare_image_label("diff", self.compare_diff_image_label), self.t("compare_image_diff"))
         self.compare_image_tabs.addTab(self._wrap_compare_image_label("before", self.compare_before_image_label), self.t("compare_image_before"))
         self.compare_image_tabs.addTab(self._wrap_compare_image_label("after", self.compare_after_image_label), self.t("compare_image_after"))
@@ -3504,6 +3512,8 @@ class MainWindow(QMainWindow):
         write_file_map(self.compare_after_root, self.compare_after_map)
 
     def _cleanup_compare_temp_dirs(self) -> None:
+        if hasattr(self, "compare_auto_cycle_timer"):
+            self.compare_auto_cycle_timer.stop()
         if hasattr(self, "compare_status_refresh_timer"):
             self.compare_status_refresh_timer.stop()
         self.compare_precache_active = False
@@ -3767,16 +3777,20 @@ class MainWindow(QMainWindow):
         self.compare_before_image_raw = before_img
         self.compare_after_image_raw = after_img
         self.compare_diff_image_raw = diff_img
+        self.compare_auto_cycle_index = 0
         self.compare_zoom_mode = "fit"
         self.compare_zoom_scale = 1.0
         self._render_compare_image_labels()
         self.compare_image_tabs.setCurrentIndex(0)
+        if hasattr(self, "compare_auto_cycle_timer") and not self.compare_auto_cycle_timer.isActive():
+            self.compare_auto_cycle_timer.start()
 
     def _reset_compare_preview(self) -> None:
         self.compare_before_image_raw = None
         self.compare_after_image_raw = None
         self.compare_diff_image_raw = None
-        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
+        self.compare_auto_cycle_index = 0
+        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label, self.compare_auto_image_label]:
             label.clear()
             label.setText(self.t("compare_image_not_available"))
 
@@ -3784,7 +3798,8 @@ class MainWindow(QMainWindow):
         self.compare_before_image_raw = None
         self.compare_after_image_raw = None
         self.compare_diff_image_raw = None
-        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label]:
+        self.compare_auto_cycle_index = 0
+        for label in [self.compare_diff_image_label, self.compare_before_image_label, self.compare_after_image_label, self.compare_auto_image_label]:
             label.clear()
             label.setText(self.t("compare_image_rendering"))
 
@@ -3881,8 +3896,33 @@ class MainWindow(QMainWindow):
             self._compare_syncing_scroll = False
 
     def on_compare_image_tab_changed(self, _: int) -> None:
+        if not hasattr(self, "compare_auto_cycle_timer"):
+            return
+        if self.compare_image_tabs.currentIndex() == 0:
+            if not self.compare_auto_cycle_timer.isActive():
+                self.compare_auto_cycle_timer.start()
+        else:
+            self.compare_auto_cycle_timer.stop()
+        if hasattr(self, "compare_zoom_mode") and self.compare_zoom_mode == "fit":
+            self._render_compare_image_labels()
         # Hidden tab scroll ranges may be finalized after tab switch.
         QTimer.singleShot(0, self._apply_compare_scroll_ratios)
+
+    def _current_compare_auto_image(self) -> QImage | None:
+        images = [self.compare_diff_image_raw, self.compare_before_image_raw, self.compare_after_image_raw]
+        if all(img is None for img in images):
+            return None
+        idx = self.compare_auto_cycle_index % len(images)
+        for _ in range(len(images)):
+            img = images[idx]
+            if img is not None:
+                return img
+            idx = (idx + 1) % len(images)
+        return None
+
+    def _advance_compare_auto_image(self) -> None:
+        self.compare_auto_cycle_index = (self.compare_auto_cycle_index + 1) % 3
+        self._render_compare_image_labels()
 
     def on_compare_zoom_fit(self) -> None:
         self.compare_zoom_mode = "fit"
@@ -3920,16 +3960,20 @@ class MainWindow(QMainWindow):
     def _current_compare_image_key(self) -> str:
         idx = self.compare_image_tabs.currentIndex()
         if idx == 1:
-            return "before"
+            return "diff"
         if idx == 2:
+            return "before"
+        if idx == 3:
             return "after"
-        return "diff"
+        return "auto"
 
     def _compare_raw_image_for_key(self, key: str) -> QImage | None:
         if key == "before":
             return self.compare_before_image_raw
         if key == "after":
             return self.compare_after_image_raw
+        if key == "auto":
+            return self._current_compare_auto_image()
         return self.compare_diff_image_raw
 
     def on_compare_image_wheel_zoom(self, factor: float, anchor_pos: QPoint) -> None:
@@ -3969,6 +4013,7 @@ class MainWindow(QMainWindow):
         self._set_compare_image_for_key(self.compare_before_image_label, self.compare_before_image_raw, fit_scale)
         self._set_compare_image_for_key(self.compare_after_image_label, self.compare_after_image_raw, fit_scale)
         self._set_compare_image_for_key(self.compare_diff_image_label, self.compare_diff_image_raw, fit_scale)
+        self._set_compare_image_for_key(self.compare_auto_image_label, self._current_compare_auto_image(), fit_scale)
         QTimer.singleShot(0, self._apply_compare_scroll_ratios)
 
     def _apply_compare_scroll_ratios(self) -> None:
@@ -3987,18 +4032,19 @@ class MainWindow(QMainWindow):
             self._compare_syncing_scroll = False
 
     def _compute_compare_fit_scale(self) -> float:
-        images = [img for img in [self.compare_before_image_raw, self.compare_after_image_raw, self.compare_diff_image_raw] if img is not None]
-        if not images:
+        key = self._current_compare_image_key()
+        image = self._compare_raw_image_for_key(key)
+        if image is None:
             return 1.0
-        max_w = max(img.width() for img in images)
-        max_h = max(img.height() for img in images)
-        if max_w <= 0 or max_h <= 0:
+        img_w = image.width()
+        img_h = image.height()
+        if img_w <= 0 or img_h <= 0:
             return 1.0
-        scroll = self.compare_image_scrolls.get("diff") or next(iter(self.compare_image_scrolls.values()), None)
+        scroll = self.compare_image_scrolls.get(key) or self.compare_image_scrolls.get("auto") or next(iter(self.compare_image_scrolls.values()), None)
         if scroll is None:
             return 1.0
         vp = scroll.viewport().size()
-        scale = min(max(1, vp.width()) / max_w, max(1, vp.height()) / max_h)
+        scale = min(max(1, vp.width()) / img_w, max(1, vp.height()) / img_h)
         return max(0.05, min(scale, 8.0))
 
     def _set_compare_image_for_key(self, label: QLabel, image: QImage | None, fit_scale: float | None) -> None:
@@ -4235,9 +4281,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "compare_render_scale_label"):
             self.compare_render_scale_label.setText(self.t("compare_image_render_scale"))
         if hasattr(self, "compare_image_tabs"):
-            self.compare_image_tabs.setTabText(0, self.t("compare_image_diff"))
-            self.compare_image_tabs.setTabText(1, self.t("compare_image_before"))
-            self.compare_image_tabs.setTabText(2, self.t("compare_image_after"))
+            self.compare_image_tabs.setTabText(0, self.t("compare_image_auto"))
+            self.compare_image_tabs.setTabText(1, self.t("compare_image_diff"))
+            self.compare_image_tabs.setTabText(2, self.t("compare_image_before"))
+            self.compare_image_tabs.setTabText(3, self.t("compare_image_after"))
         if hasattr(self, "compare_item_list") and hasattr(self, "compare_target_labels"):
             self._refresh_compare_item_list_labels()
         self.render_cli_status()

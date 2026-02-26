@@ -5,6 +5,12 @@
 - (JA) 比較プレビューにレンダリング倍率プルダウン（`1x`、`1.5x`、`2x`、`3x`、`4x`、`5x`）を追加し、選択値を設定へ保存するように変更。
 - (EN) Optimized diff processing with NumPy for `images_different` and pixel diff image generation (with safe fallback path).
 - (JA) `images_different` とピクセル差分画像生成をNumPyで高速化（安全なフォールバック経路あり）。
+- (EN) Added an Auto tab for compare preview that cycles Diff/Before/After, and set it as the default (leftmost) tab.
+- (JA) 比較プレビューに Diff/Before/After を自動切替する Auto タブを追加し、左端のデフォルトタブに変更。
+- (EN) Improved compare Fit behavior to use the active tab image size and rerender on tab switch.
+- (JA) 比較プレビューの Fit 表示を改善し、アクティブタブ基準の拡大率計算とタブ切替時の再描画に対応。
+- (EN) Fixed compare preview initialization timing issues (auto-cycle start and missing-attribute guards during startup).
+- (JA) 比較プレビュー初期化時のタイミング問題を修正（自動切替の開始漏れと起動時属性未初期化ガード）。
 
 ## 1.0.3
 - (EN) Added alternate CLI script name `kicad-snapshot` in addition to `kicad_snapshot`.
