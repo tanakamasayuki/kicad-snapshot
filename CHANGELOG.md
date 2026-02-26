@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+- (EN) Added alternate CLI script name `kicad-snapshot` in addition to `kicad_snapshot`.
+- (JA) CLIスクリプト名として既存の `kicad_snapshot` に加え、`kicad-snapshot` の別名を追加。
 
 ## 1.0.2
 - (EN) Improved app version resolution for Windows EXE startup to avoid showing `0.0.0` (added absolute-import and metadata name fallbacks).

@@ -38,6 +38,7 @@ Issues = "https://github.com/tanakamasayuki/kicad-snapshot/issues"
 
 [project.scripts]
 kicad_snapshot = "kicad_snapshot.__main__:main"
+kicad-snapshot = "kicad_snapshot.__main__:main"
 
 [dependency-groups]
 dev = [
