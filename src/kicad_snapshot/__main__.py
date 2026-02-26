@@ -54,11 +54,17 @@ try:
     from . import __version__
 except Exception:
     try:
-        from importlib.metadata import version as _pkg_version
-
-        __version__ = _pkg_version("kicad-snapshot")
+        from kicad_snapshot import __version__  # type: ignore[no-redef]
     except Exception:
-        __version__ = "0.0.0"
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            try:
+                __version__ = _pkg_version("kicad-snapshot")
+            except Exception:
+                __version__ = _pkg_version("kicad_snapshot")
+        except Exception:
+            __version__ = "0.0.0"
 
 APP_NAME = "KiCadSnapshot"
 APP_AUTHOR = "KiCadSnapshot"

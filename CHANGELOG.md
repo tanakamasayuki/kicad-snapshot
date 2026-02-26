@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+- (EN) Improved app version resolution for Windows EXE startup to avoid showing `0.0.0` (added absolute-import and metadata name fallbacks).
+- (JA) Windows EXE起動時のバージョン取得を改善し、`0.0.0` 表示を回避（絶対importとmetadata名のフォールバックを追加）。
 
 ## 1.0.1
 - (EN) Fixed Windows EXE startup import error in `__main__.py` by adding safe `__version__` fallback resolution.
