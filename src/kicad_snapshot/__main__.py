@@ -1055,46 +1055,42 @@ def detect_git_repo_root(project_dir: Path, git_path: str | None) -> Path | None
     return path if path.exists() else None
 
 
-def backup_whitelist_paths(project_dir: Path) -> list[Path]:
-    file_names = {"fp-lib-table", "sym-lib-table", "design-block-lib-table"}
-    suffixes = {
-        ".kicad_pro",
-        ".kicad_sch",
-        ".kicad_pcb",
-        ".kicad_sym",
-        ".kicad_mod",
-        ".kicad_dru",
-        ".kicad_wks",
-    }
+def _is_excluded_backup_rel_path(rel_path: str) -> bool:
+    normalized = rel_path.replace("\\", "/").strip("/")
+    if not normalized:
+        return True
+    lower = normalized.lower()
+    parts = [p.lower() for p in normalized.split("/") if p]
+    if any(p in {".git", ".venv", "__pycache__", "node_modules"} for p in parts):
+        return True
+    if lower.endswith((".zip", ".log", ".tmp", ".bak", ".cache")):
+        return True
+    return False
 
+
+def is_backup_target_path(rel_path: str) -> bool:
+    normalized = rel_path.replace("\\", "/").strip("/")
+    if _is_excluded_backup_rel_path(normalized):
+        return False
+    base_name = Path(normalized).name
+    lower_name = base_name.lower()
+    if lower_name.endswith("-lib-table"):
+        return True
+    # Future-proof for KiCad family files such as .kicad_prl.
+    if ".kicad_" in lower_name:
+        return True
+    return False
+
+
+def backup_whitelist_paths(project_dir: Path) -> list[Path]:
     selected: list[Path] = []
     for path in project_dir.rglob("*"):
         if not path.is_file():
             continue
-        if path.name in file_names or path.suffix in suffixes:
+        rel = path.relative_to(project_dir).as_posix()
+        if is_backup_target_path(rel):
             selected.append(path)
     return selected
-
-
-def is_backup_target_path(rel_path: str) -> bool:
-    file_names = {"fp-lib-table", "sym-lib-table", "design-block-lib-table"}
-    suffixes = {
-        ".kicad_pro",
-        ".kicad_sch",
-        ".kicad_pcb",
-        ".kicad_sym",
-        ".kicad_mod",
-        ".kicad_dru",
-        ".kicad_wks",
-    }
-
-    normalized = rel_path.replace("\\", "/").strip("/")
-    if not normalized:
-        return False
-    base_name = Path(normalized).name
-    if base_name in file_names:
-        return True
-    return Path(base_name).suffix in suffixes
 
 
 def build_current_project_map(project_file: Path) -> dict[str, bytes]:

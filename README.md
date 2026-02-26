@@ -10,6 +10,7 @@ KiCad project snapshot and visual diff tool (PySide6 GUI).
 ## Features
 
 - Create manual ZIP snapshots of KiCad projects
+- Snapshot target rules: include `*.kicad_*` / `*-lib-table`, exclude temporary and development artifacts
 - Compare snapshots against current project state
 - Compare snapshot-to-snapshot
 - Render schematic/PCB visual diffs

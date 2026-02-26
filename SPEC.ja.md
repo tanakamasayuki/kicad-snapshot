@@ -44,19 +44,13 @@ Gitは必須ではない。コアのワークフローは、Gitを使わない�
 
 ### 1. スナップショット（ZIPバックアップ）
 
--   KiCad互換のホワイトリスト規則でZIPアーカイブを作成
+-   include + exclude のハイブリッド規則でZIPアーカイブを作成
 -   含めるもの:
-    -   `.kicad_pro`
-    -   `.kicad_sch`
-    -   `.kicad_pcb`
-    -   `.kicad_sym`
-    -   `.kicad_mod`
-    -   `.kicad_dru`
-    -   `.kicad_wks`
-    -   `fp-lib-table`
-    -   `sym-lib-table`
-    -   `design-block-lib-table`
--   オプションのプリセットはなし（最小セットのみ）
+    -   `*.kicad_*`（例: `.kicad_pro`, `.kicad_sch`, `.kicad_pcb`, `.kicad_prl`）
+    -   `*-lib-table`（例: `fp-lib-table`, `sym-lib-table`, `design-block-lib-table`）
+-   除外（安全性/性能のため）:
+    -   `.git/`, `.venv/`, `__pycache__/`, `node_modules/`
+    -   `*.zip`, `*.log`, `*.tmp`, `*.bak`, `*.cache`
 
 参考（KiCad標準バックアップ）:
 

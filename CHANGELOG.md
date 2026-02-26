@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+- (EN) Updated snapshot backup target rules to hybrid include/exclude: include `*.kicad_*` and `*-lib-table` (including `.kicad_prl`), while excluding common dev/temp artifacts.
+- (JA) スナップショットのバックアップ対象ルールを include/exclude のハイブリッド方式に更新: `*.kicad_*` と `*-lib-table`（`.kicad_prl` 含む）を対象にし、開発・一時ファイルを除外。
 
 ## 1.0.4
 - (EN) Added a render scale dropdown in Compare preview (`1x`, `1.5x`, `2x`, `3x`, `4x`, `5x`) and persisted the selected scale in settings.

@@ -49,19 +49,13 @@ who may not use Git.
 
 ### 1. Snapshot (ZIP Backup)
 
--   Creates ZIP archive using KiCad-compatible whitelist rules
+-   Creates ZIP archive with include + exclude hybrid rules
 -   Includes:
-    -   `.kicad_pro`
-    -   `.kicad_sch`
-    -   `.kicad_pcb`
-    -   `.kicad_sym`
-    -   `.kicad_mod`
-    -   `.kicad_dru`
-    -   `.kicad_wks`
-    -   `fp-lib-table`
-    -   `sym-lib-table`
-    -   `design-block-lib-table`
--   No optional presets (minimal set only)
+    -   `*.kicad_*` (for example `.kicad_pro`, `.kicad_sch`, `.kicad_pcb`, `.kicad_prl`)
+    -   `*-lib-table` (for example `fp-lib-table`, `sym-lib-table`, `design-block-lib-table`)
+-   Excludes (safety/performance):
+    -   `.git/`, `.venv/`, `__pycache__/`, `node_modules/`
+    -   `*.zip`, `*.log`, `*.tmp`, `*.bak`, `*.cache`
 
 Reference (KiCad built-in backup):
 
