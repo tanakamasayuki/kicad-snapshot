@@ -59,6 +59,35 @@ uv sync --dev
 uv run kicad_snapshot
 ```
 
+## Upgrade
+
+### Upgrade installed package
+
+With `pip`:
+
+```bash
+pip install -U kicad-snapshot
+```
+
+With `pipx`:
+
+```bash
+pipx upgrade kicad-snapshot
+```
+
+### Upgrade ZIP build (Windows EXE)
+
+ZIP builds do not support in-place auto update. Download the latest ZIP again from GitHub Releases and re-extract it.
+
+### Upgrade project version (maintainer)
+
+Use GitHub Actions workflow `.github/workflows/release.yml` with:
+
+- `version`: next version (for example `1.0.2`)
+- `publish_pypi`: `true` to publish to PyPI, `false` to skip
+
+The workflow updates version files, updates `CHANGELOG.md`, creates tag `vX.Y.Z`, builds Windows ZIP artifacts, and optionally publishes to PyPI.
+
 ## Basic Workflow
 
 1. Start app and confirm `kicad-cli` path.

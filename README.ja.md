@@ -59,6 +59,35 @@ uv sync --dev
 uv run kicad_snapshot
 ```
 
+## バージョンアップ
+
+### インストール済みパッケージを更新
+
+`pip` の場合:
+
+```bash
+pip install -U kicad-snapshot
+```
+
+`pipx` の場合:
+
+```bash
+pipx upgrade kicad-snapshot
+```
+
+### ZIP版（Windows EXE）を更新
+
+ZIP版は上書きアップデート機能がないため、最新版のZIPをGitHub Releasesから再ダウンロードして展開し直してください。
+
+### プロジェクトのバージョン更新（メンテナー向け）
+
+GitHub Actions の `.github/workflows/release.yml` を実行し、次を指定します。
+
+- `version`: 次のバージョン（例: `1.0.2`）
+- `publish_pypi`: PyPI公開するなら `true`、しないなら `false`
+
+このワークフローで、バージョンファイル更新・`CHANGELOG.md` 更新・`vX.Y.Z` タグ作成・Windows向けZIP生成・（任意で）PyPI公開まで自動化されます。
+
 ## 基本フロー
 
 1. 起動して `kicad-cli` パスを確認
