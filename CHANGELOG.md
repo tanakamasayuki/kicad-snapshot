@@ -9,6 +9,8 @@
 - (JA) 比較プレビューの操作を更新: ホイールで拡大縮小、`Shift+ホイール`で縦スクロール、`Ctrl+ホイール`で横スクロール、カーソル位置中心のズームに対応。
 - (EN) Improved SVG preview rendering: preserve aspect ratio on fallback sizing and increase default rasterization size (upscaled from SVG default size, currently 2x).
 - (JA) SVGプレビュー描画を改善: フォールバック時も縦横比を維持し、ラスタライズ時の既定サイズを拡大（SVG既定サイズからの拡大、現在は2倍）。
+- (EN) Updated project list interaction: double-click now proceeds to Snapshot/Compare when the Continue button is enabled.
+- (JA) プロジェクト一覧の操作を更新: 「続行」ボタンが有効な場合、ダブルクリックでスナップショット/比較画面へ進むように変更。
 
 ## 0.2.0
 - (EN) Initial release

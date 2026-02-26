@@ -4359,8 +4359,10 @@ class MainWindow(QMainWindow):
         self.save_settings()
         self.update_next_state()
 
-    def on_project_chosen(self) -> None:
+    def on_project_chosen(self, *_args) -> None:
         self.update_next_state()
+        if self.proceed_btn.isEnabled():
+            self.on_continue()
 
     def run_compare(self) -> None:
         if self.compare_from_combo2.count() < 1 or self.compare_to_combo2.count() < 1:
