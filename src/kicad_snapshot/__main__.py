@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from platformdirs import user_config_dir
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QGuiApplication, QImage, QPainter, QPixmap
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -107,6 +107,7 @@ TRANSLATIONS = {
         "version_latest_ahead": "Latest: {latest} (current is newer)",
         "version_latest_unknown": "Latest: {latest}",
         "version_check_failed": "Latest version check failed",
+        "version_open_repo": "Open Web Page",
         "snapshot_window_title": "Snapshots",
         "snapshot_selected_project": "Project: {project}",
         "snapshot_open_compare": "Open Compare Screen",
@@ -227,6 +228,7 @@ TRANSLATIONS = {
         "version_latest_ahead": "最新: {latest}（現在の方が新しい）",
         "version_latest_unknown": "最新: {latest}",
         "version_check_failed": "最新バージョンの確認に失敗",
+        "version_open_repo": "Webページを開く",
         "snapshot_window_title": "スナップショット",
         "snapshot_selected_project": "プロジェクト: {project}",
         "snapshot_open_compare": "比較画面を開く",
@@ -2575,10 +2577,13 @@ class MainWindow(QMainWindow):
         self.version_current_label = QLabel("")
         self.version_check_btn = QPushButton("")
         self.version_check_btn.clicked.connect(self.on_check_latest_version)
+        self.version_repo_btn = QPushButton("")
+        self.version_repo_btn.clicked.connect(self.open_repository)
         self.version_latest_label = QLabel("")
         self.version_latest_label.setStyleSheet("color: #666666;")
         version_row.addWidget(self.version_current_label)
         version_row.addWidget(self.version_check_btn)
+        version_row.addWidget(self.version_repo_btn)
         version_row.addWidget(self.version_latest_label)
 
         divider = QFrame()
@@ -3905,9 +3910,13 @@ class MainWindow(QMainWindow):
             self.version_check_btn.setEnabled(True)
             self.render_version_info()
 
+    def open_repository(self) -> None:
+        QDesktopServices.openUrl(QUrl("https://github.com/tanakamasayuki/kicad-snapshot"))
+
     def render_version_info(self) -> None:
         self.version_current_label.setText(self.t("version_current", current=__version__))
         self.version_check_btn.setText(self.t("version_check_latest"))
+        self.version_repo_btn.setText(self.t("version_open_repo"))
         if self.latest_version_state == "checking":
             self.version_latest_label.setText(self.t("version_checking"))
             self.version_latest_label.setStyleSheet("color: #666666;")

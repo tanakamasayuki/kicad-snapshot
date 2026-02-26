@@ -1,8 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
-- (EN) Moved startup version info to the same bottom row as the settings file path (left aligned).
-- (JA) 起動直後画面のバージョン情報を、設定ファイル表示と同じ下段の左側に配置。
+- (EN) Added startup version utilities: check latest release from GitHub and open the project web page.
+- (JA) 起動画面にバージョン関連機能を追加: GitHubから最新リリース確認とWebページを開くボタン。
 
 ## 0.2.0
 - (EN) Initial release
