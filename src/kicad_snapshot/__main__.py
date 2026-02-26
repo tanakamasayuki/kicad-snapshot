@@ -50,7 +50,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from . import __version__
+try:
+    from . import __version__
+except Exception:
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        __version__ = _pkg_version("kicad-snapshot")
+    except Exception:
+        __version__ = "0.0.0"
 
 APP_NAME = "KiCadSnapshot"
 APP_AUTHOR = "KiCadSnapshot"
