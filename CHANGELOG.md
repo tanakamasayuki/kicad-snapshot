@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+
+## 1.0.4
 - (EN) Added a render scale dropdown in Compare preview (`1x`, `1.5x`, `2x`, `3x`, `4x`, `5x`) and persisted the selected scale in settings.
 - (JA) 比較プレビューにレンダリング倍率プルダウン（`1x`、`1.5x`、`2x`、`3x`、`4x`、`5x`）を追加し、選択値を設定へ保存するように変更。
 - (EN) Optimized diff processing with NumPy for `images_different` and pixel diff image generation (with safe fallback path).
