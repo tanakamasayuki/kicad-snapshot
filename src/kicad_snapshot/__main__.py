@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import locale
 import os
 import re
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.request
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -48,6 +50,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from . import __version__
 
 APP_NAME = "KiCadSnapshot"
 APP_AUTHOR = "KiCadSnapshot"
@@ -55,6 +58,7 @@ SETTINGS_FILE = "settings.toml"
 MAX_RECENT = 20
 DEFAULT_TIMELINE_LIMIT = 50
 BACKUP_DIR_NAME = "snapshot_backups"
+GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/tanakamasayuki/kicad-snapshot/releases/latest"
 SUPPORTED_LANGUAGES = ("en", "ja", "zh", "fr", "de")
 
 LANGUAGE_LABELS = {
@@ -95,6 +99,14 @@ TRANSLATIONS = {
         "group_next": "3) Next",
         "next_hint": "Continue is enabled only when CLI version is confirmed and a project is selected.",
         "continue": "Continue to Snapshot / Compare",
+        "version_current": "Version: {current}",
+        "version_check_latest": "Check Latest",
+        "version_checking": "Checking latest version...",
+        "version_latest_up_to_date": "Latest: {latest} (up to date)",
+        "version_latest_available": "Latest: {latest} (update available)",
+        "version_latest_ahead": "Latest: {latest} (current is newer)",
+        "version_latest_unknown": "Latest: {latest}",
+        "version_check_failed": "Latest version check failed",
         "snapshot_window_title": "Snapshots",
         "snapshot_selected_project": "Project: {project}",
         "snapshot_open_compare": "Open Compare Screen",
@@ -207,6 +219,14 @@ TRANSLATIONS = {
         "group_next": "3) 次へ",
         "next_hint": "CLIバージョン確認済みかつプロジェクト選択済みの場合のみ続行できます。",
         "continue": "スナップショット / 比較へ進む",
+        "version_current": "バージョン: {current}",
+        "version_check_latest": "最新を確認",
+        "version_checking": "最新バージョン確認中...",
+        "version_latest_up_to_date": "最新: {latest}（最新です）",
+        "version_latest_available": "最新: {latest}（更新あり）",
+        "version_latest_ahead": "最新: {latest}（現在の方が新しい）",
+        "version_latest_unknown": "最新: {latest}",
+        "version_check_failed": "最新バージョンの確認に失敗",
         "snapshot_window_title": "スナップショット",
         "snapshot_selected_project": "プロジェクト: {project}",
         "snapshot_open_compare": "比較画面を開く",
@@ -2428,6 +2448,8 @@ class MainWindow(QMainWindow):
         self.git_status_key = "git_checking"
         self.git_status_args: dict[str, str] = {}
         self.git_status_level = "warn"
+        self.latest_version: str | None = None
+        self.latest_version_state = "idle"
 
         self.setMinimumSize(960, 580)
 
@@ -2549,6 +2571,16 @@ class MainWindow(QMainWindow):
         content.setColumnStretch(0, 3)
         content.setColumnStretch(1, 2)
 
+        version_row = QHBoxLayout()
+        self.version_current_label = QLabel("")
+        self.version_check_btn = QPushButton("")
+        self.version_check_btn.clicked.connect(self.on_check_latest_version)
+        self.version_latest_label = QLabel("")
+        self.version_latest_label.setStyleSheet("color: #666666;")
+        version_row.addWidget(self.version_current_label)
+        version_row.addWidget(self.version_check_btn)
+        version_row.addWidget(self.version_latest_label)
+
         divider = QFrame()
         divider.setFrameShape(QFrame.HLine)
         divider.setStyleSheet("color: #dddddd;")
@@ -2556,8 +2588,9 @@ class MainWindow(QMainWindow):
 
         self.footer = QLabel("")
         self.footer.setStyleSheet("color: #999999;")
-        self.footer.setAlignment(Qt.AlignRight)
-        root_layout.addWidget(self.footer)
+        version_row.addStretch(1)
+        version_row.addWidget(self.footer)
+        root_layout.addLayout(version_row)
 
         self.startup_page = root
         self.snapshot_page = self._build_snapshot_page()
@@ -3590,6 +3623,7 @@ class MainWindow(QMainWindow):
         self.next_box.setTitle(self.t("group_next"))
         self.next_hint.setText(self.t("next_hint"))
         self.proceed_btn.setText(self.t("continue"))
+        self.render_version_info()
         self.footer.setText(self.t("footer", path=str(self.settings_store.config_path)))
         if hasattr(self, "snapshot_title"):
             self.snapshot_title.setText(self.t("snapshot_window_title"))
@@ -3832,6 +3866,72 @@ class MainWindow(QMainWindow):
             self.set_git_status("git_ok", "ok", version=best.version_text)
         else:
             self.set_git_status("git_ok_plain", "ok")
+
+    def fetch_latest_release_version(self) -> str:
+        req = urllib.request.Request(
+            GITHUB_LATEST_RELEASE_API,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "kicad-snapshot"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        tag = str(payload.get("tag_name", "")).strip()
+        if not tag:
+            raise RuntimeError("tag_name not found")
+        return tag[1:] if tag.startswith("v") else tag
+
+    def on_check_latest_version(self) -> None:
+        self.latest_version_state = "checking"
+        self.render_version_info()
+        self.version_check_btn.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            latest = self.fetch_latest_release_version()
+            self.latest_version = latest
+            current_tuple, _ = parse_version_text(__version__)
+            latest_tuple, _ = parse_version_text(latest)
+            if current_tuple is not None and latest_tuple is not None:
+                if current_tuple == latest_tuple:
+                    self.latest_version_state = "up_to_date"
+                elif current_tuple < latest_tuple:
+                    self.latest_version_state = "available"
+                else:
+                    self.latest_version_state = "ahead"
+            else:
+                self.latest_version_state = "unknown"
+        except Exception:
+            self.latest_version = None
+            self.latest_version_state = "failed"
+        finally:
+            self.version_check_btn.setEnabled(True)
+            self.render_version_info()
+
+    def render_version_info(self) -> None:
+        self.version_current_label.setText(self.t("version_current", current=__version__))
+        self.version_check_btn.setText(self.t("version_check_latest"))
+        if self.latest_version_state == "checking":
+            self.version_latest_label.setText(self.t("version_checking"))
+            self.version_latest_label.setStyleSheet("color: #666666;")
+            return
+        if self.latest_version_state == "failed":
+            self.version_latest_label.setText(self.t("version_check_failed"))
+            self.version_latest_label.setStyleSheet("color: #b00020;")
+            return
+        if not self.latest_version:
+            self.version_latest_label.setText("")
+            self.version_latest_label.setStyleSheet("color: #666666;")
+            return
+        if self.latest_version_state == "up_to_date":
+            self.version_latest_label.setText(self.t("version_latest_up_to_date", latest=self.latest_version))
+            self.version_latest_label.setStyleSheet("color: #2b7a0b;")
+        elif self.latest_version_state == "available":
+            self.version_latest_label.setText(self.t("version_latest_available", latest=self.latest_version))
+            self.version_latest_label.setStyleSheet("color: #9a6700;")
+        elif self.latest_version_state == "ahead":
+            self.version_latest_label.setText(self.t("version_latest_ahead", latest=self.latest_version))
+            self.version_latest_label.setStyleSheet("color: #2b7a0b;")
+        else:
+            self.version_latest_label.setText(self.t("version_latest_unknown", latest=self.latest_version))
+            self.version_latest_label.setStyleSheet("color: #666666;")
 
     def open_project(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
