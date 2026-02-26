@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+
+## 1.0.1
 - (EN) Fixed Windows EXE startup import error in `__main__.py` by adding safe `__version__` fallback resolution.
 - (JA) `__main__.py` の `__version__` 取得にフォールバック処理を追加し、Windows EXE起動時のimportエラーを修正。
 
