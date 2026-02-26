@@ -1224,8 +1224,34 @@ def render_svg_to_image(svg_path: Path) -> QImage:
         raise RuntimeError(f"Invalid SVG: {svg_path}")
 
     size = renderer.defaultSize()
-    width = max(1, min(size.width() if size.width() > 0 else 1400, 2000))
-    height = max(1, min(size.height() if size.height() > 0 else 1000, 2000))
+    base_w = float(size.width())
+    base_h = float(size.height())
+    view_box = renderer.viewBoxF()
+    ratio = None
+    if view_box.width() > 0 and view_box.height() > 0:
+        ratio = float(view_box.width() / view_box.height())
+
+    if base_w <= 0 or base_h <= 0:
+        if ratio is not None and ratio > 0:
+            if base_w > 0 and base_h <= 0:
+                base_h = base_w / ratio
+            elif base_h > 0 and base_w <= 0:
+                base_w = base_h * ratio
+            else:
+                base_w = 1400.0
+                base_h = base_w / ratio
+        else:
+            if base_w <= 0 and base_h <= 0:
+                base_w = 1400.0
+                base_h = 1000.0
+            elif base_w <= 0:
+                base_w = base_h * 1.4
+            else:
+                base_h = base_w / 1.4
+
+    scale = 2
+    width = max(1, min(int(round(base_w * scale)), 3000))
+    height = max(1, min(int(round(base_h * scale)), 3000))
 
     image = QImage(width, height, QImage.Format_ARGB32)
     image.fill(Qt.white)

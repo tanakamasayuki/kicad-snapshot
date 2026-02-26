@@ -7,6 +7,8 @@
 - (JA) 中国語・フランス語・ドイツ語の翻訳辞書を拡充し、UI文言の英語フォールバック依存を削減。
 - (EN) Updated compare preview interactions: wheel zoom, `Shift+Wheel` vertical scroll, `Ctrl+Wheel` horizontal scroll, and cursor-centered zooming.
 - (JA) 比較プレビューの操作を更新: ホイールで拡大縮小、`Shift+ホイール`で縦スクロール、`Ctrl+ホイール`で横スクロール、カーソル位置中心のズームに対応。
+- (EN) Improved SVG preview rendering: preserve aspect ratio on fallback sizing and increase default rasterization size (upscaled from SVG default size, currently 2x).
+- (JA) SVGプレビュー描画を改善: フォールバック時も縦横比を維持し、ラスタライズ時の既定サイズを拡大（SVG既定サイズからの拡大、現在は2倍）。
 
 ## 0.2.0
 - (EN) Initial release
