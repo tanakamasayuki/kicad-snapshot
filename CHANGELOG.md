@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+
+## 1.0.6
 - (EN) Fixed temp-directory race when leaving Compare view: stop/wait background precache rendering before cleanup to prevent reopen errors.
 - (JA) 比較画面を離れる際の一時フォルダ競合を修正: バックグラウンドのプリキャッシュ描画を停止・完了待ちしてから削除するようにし、再オープン時エラーを防止。
 
