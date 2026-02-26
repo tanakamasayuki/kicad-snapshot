@@ -18,6 +18,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
+try:
+    import numpy as np
+except Exception:
+    np = None
+
 from platformdirs import user_config_dir
 from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication, QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
@@ -1305,15 +1310,43 @@ def pad_image(image: QImage, width: int, height: int) -> QImage:
     return out
 
 
+def _qimage_to_numpy_rgba(image: QImage):
+    if np is None:
+        return None
+    rgba = image.convertToFormat(QImage.Format_RGBA8888)
+    ptr = rgba.bits()
+    h = rgba.height()
+    w = rgba.width()
+    bpl = rgba.bytesPerLine()
+    # Copy to detach from QImage lifetime (prevents dangling buffer issues).
+    arr = np.frombuffer(ptr, dtype=np.uint8, count=h * bpl).copy().reshape((h, bpl))
+    arr = arr[:, : w * 4].reshape((h, w, 4))
+    return arr
+
+
+def _numpy_rgba_to_qimage(arr) -> QImage:
+    out = np.ascontiguousarray(arr, dtype=np.uint8)
+    h, w = out.shape[:2]
+    image = QImage(out.data, w, h, w * 4, QImage.Format_RGBA8888)
+    return image.copy().convertToFormat(QImage.Format_ARGB32)
+
+
 def make_pixel_diff_image(before: QImage, after: QImage) -> QImage:
     width = max(before.width(), after.width())
     height = max(before.height(), after.height())
     b = pad_image(before, width, height)
     a = pad_image(after, width, height)
 
+    b_arr = _qimage_to_numpy_rgba(b)
+    a_arr = _qimage_to_numpy_rgba(a)
+    if b_arr is not None and a_arr is not None:
+        eq = np.all(b_arr == a_arr, axis=2)
+        red = np.array([255, 64, 64, 255], dtype=np.uint8)
+        out = np.where(eq[:, :, None], a_arr, red)
+        return _numpy_rgba_to_qimage(out)
+
     diff = QImage(width, height, QImage.Format_ARGB32)
     diff.fill(Qt.white)
-
     for y in range(height):
         for x in range(width):
             bp = b.pixel(x, y)
@@ -1321,7 +1354,6 @@ def make_pixel_diff_image(before: QImage, after: QImage) -> QImage:
             if bp == ap:
                 diff.setPixel(x, y, ap)
             else:
-                # Highlight changed pixels in red.
                 diff.setPixel(x, y, 0xFFFF4040)
     return diff
 
@@ -1331,6 +1363,10 @@ def images_different(before: QImage, after: QImage) -> bool:
     height = max(before.height(), after.height())
     b = pad_image(before, width, height)
     a = pad_image(after, width, height)
+    b_arr = _qimage_to_numpy_rgba(b)
+    a_arr = _qimage_to_numpy_rgba(a)
+    if b_arr is not None and a_arr is not None:
+        return bool(np.any(b_arr != a_arr))
     for y in range(height):
         for x in range(width):
             if b.pixel(x, y) != a.pixel(x, y):

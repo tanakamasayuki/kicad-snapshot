@@ -27,6 +27,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
 ]
 dependencies = [
+    "numpy>=2.2.0",
     "platformdirs>=4.9.2",
     "pyside6>=6.10.2",
 ]
