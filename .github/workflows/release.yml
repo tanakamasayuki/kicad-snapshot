@@ -10,7 +10,7 @@ on:
         description: "Publish package to PyPI"
         required: true
         type: boolean
-        default: false
+        default: true
 
 jobs:
   prepare:
