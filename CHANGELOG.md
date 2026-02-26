@@ -1,6 +1,8 @@
 # Changelog / 変更履歴
 
 ## Unreleased
+
+## 1.0.2
 - (EN) Improved app version resolution for Windows EXE startup to avoid showing `0.0.0` (added absolute-import and metadata name fallbacks).
 - (JA) Windows EXE起動時のバージョン取得を改善し、`0.0.0` 表示を回避（絶対importとmetadata名のフォールバックを追加）。
 
