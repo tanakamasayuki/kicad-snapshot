@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from platformdirs import user_config_dir
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication, QImage, QPainter, QPixmap
+from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication, QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -1869,6 +1869,72 @@ class EmptyCompareDialog(QDialog):
         root.addLayout(actions)
 
 
+class CompareImageScrollArea(QScrollArea):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.zoom_wheel_callback: Callable[[float, QPoint], None] | None = None
+        self._middle_dragging = False
+        self._middle_last_pos = None
+        self.setCursor(Qt.ArrowCursor)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        mods = event.modifiers()
+        if mods & Qt.ShiftModifier:
+            steps = delta / 120.0
+            vbar = self.verticalScrollBar()
+            step = max(1, vbar.singleStep() * 3)
+            vbar.setValue(vbar.value() - int(round(steps * step)))
+            event.accept()
+            return
+        if mods & Qt.ControlModifier:
+            steps = delta / 120.0
+            hbar = self.horizontalScrollBar()
+            step = max(1, hbar.singleStep() * 3)
+            hbar.setValue(hbar.value() - int(round(steps * step)))
+            event.accept()
+            return
+        if self.zoom_wheel_callback is None:
+            super().wheelEvent(event)
+            return
+        steps = delta / 120.0
+        factor = 1.15 ** steps
+        self.zoom_wheel_callback(factor, event.position().toPoint())
+        event.accept()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MiddleButton:
+            self._middle_dragging = True
+            self._middle_last_pos = event.globalPosition().toPoint()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._middle_dragging and self._middle_last_pos is not None:
+            current = event.globalPosition().toPoint()
+            delta = current - self._middle_last_pos
+            self._middle_last_pos = current
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MiddleButton and self._middle_dragging:
+            self._middle_dragging = False
+            self._middle_last_pos = None
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class ItemDiffDialog(QDialog):
     def __init__(
         self,
@@ -3110,9 +3176,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(wrap)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        scroll = QScrollArea()
+        scroll = CompareImageScrollArea()
         scroll.setWidgetResizable(False)
         scroll.setWidget(label)
+        scroll.zoom_wheel_callback = self.on_compare_image_wheel_zoom
         self.compare_image_scrolls[key] = scroll
         layout.addWidget(scroll, 1)
         return wrap
@@ -3682,6 +3749,53 @@ class MainWindow(QMainWindow):
         self.compare_zoom_mode = "manual"
         self.compare_zoom_scale = max(self.compare_zoom_scale / 1.25, 0.1)
         self._render_compare_image_labels()
+
+    def _current_compare_image_key(self) -> str:
+        idx = self.compare_image_tabs.currentIndex()
+        if idx == 1:
+            return "before"
+        if idx == 2:
+            return "after"
+        return "diff"
+
+    def _compare_raw_image_for_key(self, key: str) -> QImage | None:
+        if key == "before":
+            return self.compare_before_image_raw
+        if key == "after":
+            return self.compare_after_image_raw
+        return self.compare_diff_image_raw
+
+    def on_compare_image_wheel_zoom(self, factor: float, anchor_pos: QPoint) -> None:
+        key = self._current_compare_image_key()
+        scroll = self.compare_image_scrolls.get(key)
+        raw = self._compare_raw_image_for_key(key)
+        if scroll is None or raw is None or raw.width() <= 0 or raw.height() <= 0:
+            return
+
+        if self.compare_zoom_mode == "fit":
+            old_scale = self._compute_compare_fit_scale()
+        else:
+            old_scale = self.compare_zoom_scale
+        old_w = max(1, int(raw.width() * old_scale))
+        old_h = max(1, int(raw.height() * old_scale))
+        content_x = scroll.horizontalScrollBar().value() + anchor_pos.x()
+        content_y = scroll.verticalScrollBar().value() + anchor_pos.y()
+        ratio_x = max(0.0, min(1.0, content_x / max(1, old_w)))
+        ratio_y = max(0.0, min(1.0, content_y / max(1, old_h)))
+
+        self.compare_zoom_mode = "manual"
+        self.compare_zoom_scale = max(0.1, min(old_scale * factor, 8.0))
+        self._render_compare_image_labels()
+        new_w = max(1, int(raw.width() * self.compare_zoom_scale))
+        new_h = max(1, int(raw.height() * self.compare_zoom_scale))
+        new_content_x = int(round(ratio_x * new_w))
+        new_content_y = int(round(ratio_y * new_h))
+        hbar = scroll.horizontalScrollBar()
+        vbar = scroll.verticalScrollBar()
+        hx = new_content_x - anchor_pos.x()
+        vy = new_content_y - anchor_pos.y()
+        hbar.setValue(max(0, min(hbar.maximum(), hx)))
+        vbar.setValue(max(0, min(vbar.maximum(), vy)))
 
     def _render_compare_image_labels(self) -> None:
         fit_scale = self._compute_compare_fit_scale() if self.compare_zoom_mode == "fit" else None
