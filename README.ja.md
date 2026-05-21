@@ -45,6 +45,12 @@ cd kicad-snapshot
 pip install .
 ```
 
+### Arch Linux (AUR) から
+
+```bash
+yay -Syu python-kicad-snapshot
+```
+
 ## 起動方法
 
 インストール済み環境から:
